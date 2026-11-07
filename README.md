@@ -6,7 +6,7 @@ bicord 寓意双向录制，把系统声音和麦克风录进同一个文件。
 
 打开 `bicord.app`，点击「开始录音」，按 macOS 提示允许系统音频录制和麦克风访问。麦克风默认开启，可在录音前关闭。界面会显示 macOS 当前输入和输出设备，录音中的设备切换会接入同一次录音，设备重新连接时可能有短暂静音。
 
-点击「停止并保存」后，合成的 M4A 文件会出现在 `~/bicord`。可以从应用内播放文件，或在 Finder 中定位。录音期间，原始音频片段保存在同一目录下的隐藏子目录，导出成功后会清理。导出失败时，界面会显示原始片段的路径。
+点击「停止并保存」后，合成的 M4A 文件默认保存在 `~/bicord`。可在「录音文件」中点击「更改目录」，应用会记住选择，并显示该目录中的录音。可以从应用内播放文件，或在 Finder 中定位。录音期间，原始音频片段保存在同一目录下的隐藏子目录，导出成功后会清理。导出失败时，界面会显示原始片段的路径。
 
 ## 构建
 
@@ -25,7 +25,7 @@ open src-tauri/target/release/bundle/macos/bicord.app
 ```sh
 xcrun clang -fobjc-arc -fblocks -mmacosx-version-min=14.2 \
   src-tauri/native/recorder-test.m -o /tmp/bicord-recorder-test \
-  -framework Foundation -framework AVFoundation -framework AudioToolbox \
+  -framework AppKit -framework Foundation -framework AVFoundation -framework AudioToolbox \
   -framework CoreAudio -framework CoreMedia
 /tmp/bicord-recorder-test
 ```

@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import {
-  Activity, ArrowUpRight, AudioLines, Check, CircleAlert, FolderOpen,
+  Activity, ArrowUpRight, AudioLines, Check, CircleAlert, FolderOpen, FolderCog,
   HardDrive, Headphones, LoaderCircle, Mic, Play, RefreshCw, Square, Volume2,
 } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -24,6 +24,7 @@ type AudioStatus = {
 }
 
 type Recording = { name: string; duration: number; bytes: number }
+type Library = { directory: string; recordings: Recording[] }
 type Phase = "starting" | "saving" | null
 type Notice = { text: string; error: boolean }
 
@@ -74,7 +75,9 @@ function App() {
   const [mic, setMic] = useState(true)
   const [phase, setPhase] = useState<Phase>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
-  const [recordings, setRecordings] = useState<Recording[] | null>(null)
+  const [library, setLibrary] = useState<Library | null>(null)
+  const recordings = library?.recordings
+  const [choosingDirectory, setChoosingDirectory] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const active = audio?.elapsed != null
 
@@ -85,7 +88,7 @@ function App() {
   async function refresh() {
     setRefreshing(true)
     try {
-      setRecordings(await invoke<Recording[]>("recording_list"))
+      setLibrary(await invoke<Library>("recording_list"))
     } catch (error) {
       report(error)
     } finally {
@@ -137,6 +140,21 @@ function App() {
     }
   }
 
+  async function chooseDirectory() {
+    setChoosingDirectory(true)
+    try {
+      if (await invoke<boolean>("recording_choose_directory")) {
+        setNotice(null)
+        setLibrary(null)
+        await refresh()
+      }
+    } catch (error) {
+      report(error)
+    } finally {
+      setChoosingDirectory(false)
+    }
+  }
+
   async function open(name: string | null = null, reveal = false) {
     try {
       await invoke("recording_open", { name, reveal })
@@ -171,7 +189,7 @@ function App() {
             </div>
             <div className="counter">{time(audio?.elapsed ?? 0)}</div>
             <p className="console-copy">{active ? "录音会跟随当前音频设备。" : "录下会议里听到的，也录下你说的。"}</p>
-            <Button className="record-button" size="lg" onClick={record} disabled={!!phase}>
+            <Button className="record-button" size="lg" onClick={record} disabled={!!phase || choosingDirectory}>
               {phase
                 ? <LoaderCircle className="animate-spin" />
                 : active ? <Square fill="currentColor" className="size-3!" /> : <span className="record-dot" />}
@@ -209,10 +227,12 @@ function App() {
           <div className="section-head">
             <h2 id="recordings-title">录音文件 {recordings && <span className="recording-count">{recordings.length}</span>}</h2>
             <div className="history-actions">
-              <Button size="icon-sm" variant="ghost" disabled={refreshing} onClick={refresh} aria-label="刷新录音列表" title="刷新录音列表">
+              <Button size="icon-sm" variant="ghost" disabled={refreshing || choosingDirectory} onClick={refresh} aria-label="刷新录音列表" title="刷新录音列表">
                 <RefreshCw className={refreshing ? "animate-spin" : ""} />
               </Button>
-              <Button size="sm" variant="outline" onClick={() => open()}><FolderOpen />打开文件夹</Button>
+              <Button size="sm" variant="outline" disabled={choosingDirectory} onClick={() => open()}><FolderOpen />打开文件夹</Button>
+              <Button size="sm" variant="outline" disabled={active || !!phase || choosingDirectory || refreshing}
+                onClick={chooseDirectory}><FolderCog />更改目录</Button>
             </div>
           </div>
           <Card className="history-card">
@@ -246,7 +266,7 @@ function App() {
         </section>
       </main>
 
-      <footer><span>bicord · macOS</span><span>~/bicord</span></footer>
+      <footer><span>bicord · macOS</span><span className="save-directory" title={library?.directory}>{library?.directory}</span></footer>
     </div>
   )
 }

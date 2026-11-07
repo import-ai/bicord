@@ -110,7 +110,9 @@ button:not(:disabled) { cursor: pointer; }
 .notice { position: relative; margin-top: 12px; padding-right: 41px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .notice-close { position: absolute; top: 8px; right: 8px; }
 .notice-close:disabled { visibility: hidden; }
-footer { display: flex; justify-content: space-between; padding: 17px 0; font-size: 11px; color: var(--color-muted-foreground); }
+footer { display: flex; justify-content: space-between; gap: 16px; padding: 17px 0; font-size: 11px; color: var(--color-muted-foreground); }
+
+.save-directory { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 760px) {
   .wave { width: 37%; right: 5%; }

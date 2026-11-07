@@ -5,6 +5,7 @@ fn main() {
         .flags(["-fobjc-arc", "-fblocks", "-mmacosx-version-min=14.2"])
         .compile("bicord_recorder");
     for framework in [
+        "AppKit",
         "Foundation",
         "AVFoundation",
         "AudioToolbox",

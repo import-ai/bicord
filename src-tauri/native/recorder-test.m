@@ -48,7 +48,12 @@ int main(void) {
         NSString *error = exportSegments(@[system, systemNext], @[mic, micNext], YES, output, &warning);
         if (error || warning) NSLog(@"Export issue: %@ %@", error, warning);
         assert(!error && !warning);
-        AVAudioFile *file = [[AVAudioFile alloc] initForReading:output error:NULL];
+        NSURL *published = [directory URLByAppendingPathComponent:@"recording.m4a"];
+        assert(!sy_publish(output.path.UTF8String, published.path.UTF8String));
+        char *publishError = sy_publish(system.url.path.UTF8String, published.path.UTF8String);
+        assert(publishError && [NSFileManager.defaultManager fileExistsAtPath:system.url.path]);
+        sy_free(publishError);
+        AVAudioFile *file = [[AVAudioFile alloc] initForReading:published error:NULL];
         assert(file && fabs(file.length / file.fileFormat.sampleRate - 2.4) < 0.05);
         AVAudioPCMBuffer *audio = [[AVAudioPCMBuffer alloc] initWithPCMFormat:file.processingFormat
                                                                 frameCapacity:(AVAudioFrameCount)file.length];

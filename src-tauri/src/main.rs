@@ -2,7 +2,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{c_char, c_void, CStr, CString},
-    fs,
+    fs, io,
     os::unix::{ffi::OsStrExt, fs::DirBuilderExt},
     path::{Path, PathBuf},
     process::Command,
@@ -24,6 +24,8 @@ extern "C" {
         error: *mut *mut c_char,
         warning: *mut *mut c_char,
     );
+    fn sy_publish(source: *const c_char, destination: *const c_char) -> *mut c_char;
+    fn sy_choose_directory(path: *const c_char) -> *mut c_char;
     fn sy_duration(path: *const c_char) -> f64;
     fn sy_free(value: *mut c_char);
 }
@@ -74,6 +76,12 @@ struct Recording {
     bytes: u64,
 }
 
+#[derive(Serialize)]
+struct Library {
+    directory: String,
+    recordings: Vec<Recording>,
+}
+
 fn c_path(path: &Path) -> Result<CString, String> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| "录音路径无效。".into())
 }
@@ -90,18 +98,78 @@ fn take_string(value: *mut c_char) -> Option<String> {
     Some(result)
 }
 
-fn library(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = app
-        .path()
+fn default_library(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
         .home_dir()
-        .map_err(|error| error.to_string())?
-        .join("bicord");
+        .map(|home| home.join("bicord"))
+        .map_err(|error| error.to_string())
+}
+
+fn library_preference(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|config| config.join("recording-directory"))
+        .map_err(|error| error.to_string())
+}
+
+fn preferred_library(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    match fs::read_to_string(library_preference(app)?) {
+        Ok(value) if Path::new(&value).is_absolute() => Ok(Some(PathBuf::from(value))),
+        Ok(_) => Err("保存目录设置无效，请重新选择目录。".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("无法读取保存目录设置。{error}")),
+    }
+}
+
+fn library(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = preferred_library(app)? {
+        if path.is_dir() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "保存目录不可用，请重新选择目录。{}",
+            path.display()
+        ));
+    }
+
+    let path = default_library(app)?;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&path)
         .map_err(|error| format!("无法创建录音目录。{error}"))?;
     Ok(path)
+}
+
+fn choose_library(app: &AppHandle) -> Result<bool, String> {
+    let state = app.state::<Recorder>();
+    if state.busy.load(Ordering::Acquire) {
+        return Err("请先停止录音并等待文件保存。".into());
+    }
+    let initial = preferred_library(app)
+        .ok()
+        .flatten()
+        .filter(|path| path.is_dir())
+        .unwrap_or(default_library(app)?);
+    let initial = c_path(&initial)?;
+    let Some(selected) = take_string(unsafe { sy_choose_directory(initial.as_ptr()) }) else {
+        return Ok(false);
+    };
+    let _session = state.session.lock().map_err(|error| error.to_string())?;
+    if state.busy.load(Ordering::Acquire) {
+        return Err("请先停止录音并等待文件保存。".into());
+    }
+    if !Path::new(&selected).is_dir() {
+        return Err("所选保存目录不可用。".into());
+    }
+
+    let preference = library_preference(app)?;
+    let temporary = preference.with_extension(std::process::id().to_string());
+    fs::create_dir_all(preference.parent().ok_or("找不到设置目录。")?)
+        .and_then(|_| fs::write(&temporary, selected))
+        .and_then(|_| fs::rename(&temporary, &preference))
+        .map_err(|error| format!("无法保存录音目录设置。{error}"))?;
+    Ok(true)
 }
 
 fn start(app: &AppHandle, microphone: bool) -> Result<Status, String> {
@@ -175,8 +243,11 @@ fn stop(app: &AppHandle) -> Result<Option<String>, String> {
             return Err(error);
         }
 
-        let destination = session.directory.with_file_name(&session.name);
-        fs::hard_link(&pending, destination).map_err(|error| format!("无法保存 M4A。{error}"))?;
+        let destination = c_path(&session.directory.with_file_name(&session.name))?;
+        if let Some(error) = take_string(unsafe { sy_publish(path.as_ptr(), destination.as_ptr()) })
+        {
+            return Err(format!("无法保存 M4A。{error}"));
+        }
         let _ = fs::remove_dir_all(&session.directory);
         Ok(notice)
     })();
@@ -190,9 +261,10 @@ fn recording_name(name: &str) -> bool {
         && Path::new(name).file_name().and_then(|part| part.to_str()) == Some(name)
 }
 
-fn list(app: &AppHandle) -> Result<Vec<Recording>, String> {
+fn list(app: &AppHandle) -> Result<Library, String> {
+    let path = library(app)?;
     let mut recordings = Vec::new();
-    for entry in fs::read_dir(library(app)?).map_err(|error| error.to_string())? {
+    for entry in fs::read_dir(&path).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if !recording_name(&name) || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
@@ -209,7 +281,17 @@ fn list(app: &AppHandle) -> Result<Vec<Recording>, String> {
         });
     }
     recordings.sort_unstable_by(|a, b| b.name.cmp(&a.name));
-    Ok(recordings)
+    let directory = app
+        .path()
+        .home_dir()
+        .ok()
+        .and_then(|home| path.strip_prefix(home).ok())
+        .map(|relative| Path::new("~").join(relative))
+        .unwrap_or(path);
+    Ok(Library {
+        directory: directory.display().to_string(),
+        recordings,
+    })
 }
 
 async fn background<T: Send + 'static>(
@@ -241,8 +323,13 @@ async fn recording_stop(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn recording_list(app: AppHandle) -> Result<Vec<Recording>, String> {
+async fn recording_list(app: AppHandle) -> Result<Library, String> {
     background(move || list(&app)).await
+}
+
+#[tauri::command]
+async fn recording_choose_directory(app: AppHandle) -> Result<bool, String> {
+    background(move || choose_library(&app)).await
 }
 
 #[tauri::command]
@@ -288,6 +375,7 @@ fn main() {
             recording_status,
             recording_stop,
             recording_list,
+            recording_choose_directory,
             recording_open
         ])
         .on_window_event(|window, event| {

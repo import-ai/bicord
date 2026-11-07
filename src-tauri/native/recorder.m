@@ -1,3 +1,4 @@
+#import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreAudio/AudioHardwareTapping.h>
@@ -564,6 +565,36 @@ void sy_stop(void *handle, const char *destination, char **error, char **warning
         if (issue) *error = strdup(issue.UTF8String);
         if (notice) *warning = strdup(notice.UTF8String);
     }
+}
+
+char *sy_publish(const char *source, const char *destination) {
+    @autoreleasepool {
+        NSError *error = nil;
+        if ([NSFileManager.defaultManager moveItemAtPath:[NSString stringWithUTF8String:source]
+                                                  toPath:[NSString stringWithUTF8String:destination] error:&error]) {
+            return NULL;
+        }
+        return strdup(error.localizedDescription.UTF8String ?: "Could not move the recording.");
+    }
+}
+
+char *sy_choose_directory(const char *path) {
+    __block char *selected = NULL;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSOpenPanel *panel = NSOpenPanel.openPanel;
+        panel.title = @"选择录音保存目录";
+        panel.prompt = @"选择";
+        panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path] isDirectory:YES];
+        panel.canChooseDirectories = YES;
+        panel.canChooseFiles = NO;
+        panel.allowsMultipleSelection = NO;
+        panel.canCreateDirectories = YES;
+        if ([panel runModal] == NSModalResponseOK) {
+            const char *value = panel.URL.path.UTF8String;
+            if (value) selected = strdup(value);
+        }
+    });
+    return selected;
 }
 
 double sy_duration(const char *path) {
