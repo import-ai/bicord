@@ -45,7 +45,7 @@ int main(void) {
         SYTrack *micNext = tone(directory, @"mic-b.caf", 1170, 32000, 1, start + AudioConvertNanosToHostTime(1400000000));
         NSURL *output = [directory URLByAppendingPathComponent:@"test.m4a"];
         NSString *warning = nil;
-        NSString *error = exportSegments(@[system, systemNext], @[mic, micNext], YES, output, &warning);
+        NSString *error = exportSegments(@[system, systemNext], @[mic, micNext], YES, YES, output, &warning);
         if (error || warning) NSLog(@"Export issue: %@ %@", error, warning);
         assert(!error && !warning);
         NSURL *published = [directory URLByAppendingPathComponent:@"recording.m4a"];
@@ -61,6 +61,12 @@ int main(void) {
         assert(amplitude(audio, 440, 0.5) > 0.10 && amplitude(audio, 730, 0.5) > 0.10);
         assert(amplitude(audio, 980, 1.6) > 0.10 && amplitude(audio, 1170, 1.6) > 0.10);
         assert(amplitude(audio, 730, 0.05) < 0.02);
+        NSURL *micOnly = [directory URLByAppendingPathComponent:@"mic-only.m4a"];
+        NSURL *systemOnly = [directory URLByAppendingPathComponent:@"system-only.m4a"];
+        assert(!exportSegments(@[], @[mic], NO, YES, micOnly, &warning) && !warning);
+        assert(!exportSegments(@[system], @[], YES, NO, systemOnly, &warning) && !warning);
+        assert(fabs(sy_duration(micOnly.path.UTF8String) - 1) < 0.05);
+        assert(fabs(sy_duration(systemOnly.path.UTF8String) - 1) < 0.05);
         assert([NSFileManager.defaultManager removeItemAtURL:directory error:NULL]);
         puts("M4A mix preserved both sources before and after a device format change.");
     }

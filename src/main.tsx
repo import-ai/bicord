@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import {
   ArrowUpRight, AudioLines, Check, Circle, CircleAlert, FolderOpen, FolderCog,
-  HardDrive, Headphones, LoaderCircle, Mic, Play, RefreshCw, Square, Volume2,
+  HardDrive, Headphones, LoaderCircle, Mic, Play, RefreshCw, Square, Volume2, type LucideIcon,
 } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -15,6 +15,7 @@ import "./index.css"
 
 type AudioStatus = {
   elapsed: number | null
+  systemAudio: boolean | null
   microphone: boolean | null
   systemLevel: number
   micLevel: number
@@ -40,47 +41,41 @@ function meter(level: number) {
   return level > 0 ? Math.max(0, Math.min(1, (20 * Math.log10(level) + 54) / 54)) : 0
 }
 
-function Source({ label, device, level, microphone, onToggle, disabled }: {
+function Source({ icon: Icon, label, device, level, enabled, onToggle, disabled }: {
+  icon: LucideIcon
   label: string
   device: string
   level: number
-  microphone?: boolean
-  onToggle?: (enabled: boolean) => void
-  disabled?: boolean
+  enabled: boolean
+  onToggle: (enabled: boolean) => void
+  disabled: boolean
 }) {
-  const Icon = onToggle ? Mic : Volume2
-  const enabled = microphone !== false
   const activeBars = enabled ? meter(level) * 24 : 0
 
   return (
-    <Card className="gap-4">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Icon className="size-4 text-muted-foreground" />
-          {label}
-        </CardTitle>
-        <CardDescription className="truncate" title={device}>
-          {enabled ? device : "已关闭麦克风"}
-        </CardDescription>
-        <CardAction>
-          {onToggle
-            ? <Switch checked={enabled} onCheckedChange={onToggle} disabled={disabled} aria-label="采集麦克风" />
-            : <Badge variant="secondary">始终录制</Badge>}
-        </CardAction>
-      </CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-24 gap-1" aria-hidden="true">
-          {Array.from({ length: 24 }, (_, i) => (
-            <span key={i} className={i < activeBars ? "h-1.5 rounded-full bg-primary" : "h-1.5 rounded-full bg-muted"} />
-          ))}
+    <div className="space-y-2.5 py-3 first:pt-0 last:pb-0">
+      <div className="flex items-center gap-3">
+        <Icon className="size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">{label}</p>
+          <p className="truncate text-xs text-muted-foreground" title={enabled ? device : undefined}>
+            {enabled ? device : "已关闭"}
+          </p>
         </div>
-      </CardContent>
-    </Card>
+        <Switch checked={enabled} onCheckedChange={onToggle} disabled={disabled} aria-label={`采集${label}`} />
+      </div>
+      <div className="grid grid-cols-24 gap-1" aria-hidden="true">
+        {Array.from({ length: 24 }, (_, i) => (
+          <span key={i} className={i < activeBars ? "h-1.5 rounded-full bg-primary" : "h-1.5 rounded-full bg-muted"} />
+        ))}
+      </div>
+    </div>
   )
 }
 
 function App() {
   const [audio, setAudio] = useState<AudioStatus | null>(null)
+  const [systemAudio, setSystemAudio] = useState(true)
   const [mic, setMic] = useState(true)
   const [phase, setPhase] = useState<Phase>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -89,6 +84,7 @@ function App() {
   const [choosingDirectory, setChoosingDirectory] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const active = audio?.elapsed != null
+  const noSources = !systemAudio && !mic
 
   function report(error: unknown) {
     setNotice({ text: String(error), error: true })
@@ -136,11 +132,11 @@ function App() {
     try {
       if (active) {
         const warning = await invoke<string | null>("recording_stop")
-        setAudio(previous => previous && { ...previous, elapsed: null, microphone: null, systemLevel: 0, micLevel: 0, warning: null })
+        setAudio(previous => previous && { ...previous, elapsed: null, systemAudio: null, microphone: null, systemLevel: 0, micLevel: 0, warning: null })
         setNotice({ text: warning ?? "录音已保存到本机。", error: !!warning })
         await refresh()
       } else {
-        setAudio(await invoke<AudioStatus>("recording_start", { microphone: mic }))
+        setAudio(await invoke<AudioStatus>("recording_start", { systemAudio, microphone: mic }))
       }
     } catch (error) {
       report(error)
@@ -178,7 +174,7 @@ function App() {
   const warning = phase ? null : audio?.warning
 
   return (
-    <div className="mx-auto flex max-w-4xl flex-col gap-6 p-6 md:p-8">
+    <div className="flex flex-col gap-4 p-4">
       <header className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <span className="grid size-9 place-items-center rounded-md border bg-muted">
@@ -192,12 +188,12 @@ function App() {
         <Badge variant="outline"><HardDrive />本机保存</Badge>
       </header>
 
-      <main className="flex flex-col gap-6">
-        <Card role="region" aria-labelledby="recorder-title">
-          <CardHeader>
+      <main className="flex flex-col gap-4">
+        <Card role="region" aria-labelledby="recorder-title" className="gap-4 py-4">
+          <CardHeader className="px-4">
             <CardTitle id="recorder-title">录音台</CardTitle>
             <CardDescription>
-              {active ? "录音会跟随当前音频设备。" : "录下会议里听到的，也录下你说的。"}
+              {active ? "录音会跟随当前音频设备。" : noSources ? "请至少开启一路音频。" : "录下会议里听到的，也录下你说的。"}
             </CardDescription>
             <CardAction>
               <Badge role="status" variant={active && !phase ? "destructive" : "secondary"}>
@@ -205,13 +201,13 @@ function App() {
               </Badge>
             </CardAction>
           </CardHeader>
-          <CardContent>
-            <div className="font-mono text-4xl leading-none font-semibold tracking-tight tabular-nums sm:text-5xl">
+          <CardContent className="px-4">
+            <div className="font-mono text-4xl leading-none font-semibold tracking-tight tabular-nums">
               {time(audio?.elapsed ?? 0)}
             </div>
           </CardContent>
-          <CardFooter>
-            <Button onClick={record} disabled={!!phase || choosingDirectory}>
+          <CardFooter className="px-4">
+            <Button onClick={record} disabled={!!phase || choosingDirectory || (!active && noSources)}>
               {phase
                 ? <LoaderCircle className="motion-safe:animate-spin" />
                 : active ? <Square fill="currentColor" /> : <Circle fill="currentColor" />}
@@ -230,19 +226,22 @@ function App() {
           </Alert>
         )}
 
-        <section className="space-y-3" aria-labelledby="devices-title">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 id="devices-title" className="text-base font-semibold">音频来源</h2>
-            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Headphones className="size-4" />跟随 macOS 当前设备
-            </span>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Source label="系统声音" device={audio?.outputName ?? "正在检测…"} level={systemLevel} />
-            <Source label="麦克风" device={audio?.inputName ?? "正在检测…"} level={micLevel}
-              microphone={audio?.microphone ?? mic} onToggle={setMic} disabled={active || !!phase} />
-          </div>
-        </section>
+        <Card role="region" aria-labelledby="devices-title" className="gap-3 py-4">
+          <CardHeader className="px-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 id="devices-title" className="text-base font-semibold">音频来源</h2>
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Headphones className="size-4" />跟随 macOS 当前设备
+              </span>
+            </div>
+          </CardHeader>
+          <CardContent className="divide-y px-4">
+            <Source icon={Volume2} label="系统声音" device={audio?.outputName ?? "正在检测…"} level={systemLevel}
+              enabled={audio?.systemAudio ?? systemAudio} onToggle={setSystemAudio} disabled={active || !!phase} />
+            <Source icon={Mic} label="麦克风" device={audio?.inputName ?? "正在检测…"} level={micLevel}
+              enabled={audio?.microphone ?? mic} onToggle={setMic} disabled={active || !!phase} />
+          </CardContent>
+        </Card>
 
         <section className="space-y-3" aria-labelledby="recordings-title">
           <div className="flex flex-wrap items-center justify-between gap-2">

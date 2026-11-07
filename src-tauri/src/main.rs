@@ -16,7 +16,12 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 
 extern "C" {
-    fn sy_start(path: *const c_char, mic: bool, error: *mut *mut c_char) -> *mut c_void;
+    fn sy_start(
+        path: *const c_char,
+        system: bool,
+        mic: bool,
+        error: *mut *mut c_char,
+    ) -> *mut c_void;
     fn sy_snapshot(handle: *mut c_void) -> *mut c_char;
     fn sy_stop(
         handle: *mut c_void,
@@ -40,6 +45,7 @@ struct Session {
     started: Instant,
     directory: PathBuf,
     name: String,
+    system_audio: bool,
     microphone: bool,
 }
 
@@ -65,6 +71,7 @@ struct Status {
     #[serde(flatten)]
     audio: AudioStatus,
     elapsed: Option<f64>,
+    system_audio: Option<bool>,
     microphone: Option<bool>,
 }
 
@@ -172,7 +179,10 @@ fn choose_library(app: &AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
-fn start(app: &AppHandle, microphone: bool) -> Result<Status, String> {
+fn start(app: &AppHandle, system_audio: bool, microphone: bool) -> Result<Status, String> {
+    if !system_audio && !microphone {
+        return Err("请至少开启一路音频。".into());
+    }
     let state = app.state::<Recorder>();
     let mut session = state.session.lock().map_err(|error| error.to_string())?;
     if session.is_some() {
@@ -190,7 +200,7 @@ fn start(app: &AppHandle, microphone: bool) -> Result<Status, String> {
             .create(&directory)
             .map_err(|error| format!("无法创建临时录音目录。{error}"))?;
         let mut error = null_mut();
-        let handle = unsafe { sy_start(path.as_ptr(), microphone, &mut error) };
+        let handle = unsafe { sy_start(path.as_ptr(), system_audio, microphone, &mut error) };
         let Some(handle) = NonNull::new(handle) else {
             let _ = fs::remove_dir_all(&directory);
             return Err(take_string(error).unwrap_or_else(|| "无法开始录音。".into()));
@@ -200,6 +210,7 @@ fn start(app: &AppHandle, microphone: bool) -> Result<Status, String> {
             started: Instant::now(),
             directory,
             name,
+            system_audio,
             microphone,
         });
         Ok(())
@@ -217,6 +228,7 @@ fn snapshot(session: Option<&Session>) -> Result<Status, String> {
     Ok(Status {
         audio: serde_json::from_str(&json).map_err(|error| error.to_string())?,
         elapsed: session.map(|session| session.started.elapsed().as_secs_f64()),
+        system_audio: session.map(|session| session.system_audio),
         microphone: session.map(|session| session.microphone),
     })
 }
@@ -303,8 +315,12 @@ async fn background<T: Send + 'static>(
 }
 
 #[tauri::command]
-async fn recording_start(app: AppHandle, microphone: bool) -> Result<Status, String> {
-    background(move || start(&app, microphone)).await
+async fn recording_start(
+    app: AppHandle,
+    system_audio: bool,
+    microphone: bool,
+) -> Result<Status, String> {
+    background(move || start(&app, system_audio, microphone)).await
 }
 
 #[tauri::command]

@@ -195,8 +195,8 @@ static double hostSeconds(UInt64 hostTime) {
 }
 @end
 
-static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *mic, BOOL withMic,
-                                NSURL *destination, NSString **warning) {
+static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *mic,
+                                BOOL withSystem, BOOL withMic, NSURL *destination, NSString **warning) {
     NSArray<NSArray<SYTrack *> *> *sources = @[system, mic];
     UInt64 origin = UINT64_MAX;
     for (NSArray<SYTrack *> *segments in sources) {
@@ -205,7 +205,7 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
             if (segment.warning) *warning = segment.warning;
         }
     }
-    if (origin == UINT64_MAX) return @"没有采集到音频。请检查音频设备及系统音频录制权限。";
+    if (origin == UINT64_MAX) return @"没有采集到音频。请检查已开启的音源和录音权限。";
 
     AVMutableComposition *composition = [AVMutableComposition composition];
     NSMutableArray<AVAudioMixInputParameters *> *parameters = [NSMutableArray array];
@@ -245,7 +245,7 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
         }
         if (track) {
             [parameters addObject:[AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:track]];
-        } else if (segments == system || withMic) {
+        } else if (segments == system ? withSystem : withMic) {
             *warning = segments == system ? @"本次仅保存了麦克风声音，系统音频没有收到数据。"
                                           : @"本次仅保存了系统声音，麦克风没有收到数据。";
         }
@@ -270,6 +270,7 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
     NSURL *_directory;
     dispatch_queue_t _control;
     dispatch_source_t _routeTimer;
+    BOOL _withSystem;
     BOOL _withMic;
     BOOL _systemRunning;
     BOOL _micTapInstalled;
@@ -287,16 +288,17 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
     NSString *_systemIssue;
     NSString *_micIssue;
 }
-- (instancetype)initWithDirectory:(NSURL *)directory withMic:(BOOL)withMic;
+- (instancetype)initWithDirectory:(NSURL *)directory withSystem:(BOOL)withSystem withMic:(BOOL)withMic;
 - (NSString *)start;
 - (NSDictionary *)snapshot;
 - (NSString *)stopAndExport:(NSURL *)destination warning:(NSString **)warning;
 @end
 
 @implementation SYRecorder
-- (instancetype)initWithDirectory:(NSURL *)directory withMic:(BOOL)withMic {
+- (instancetype)initWithDirectory:(NSURL *)directory withSystem:(BOOL)withSystem withMic:(BOOL)withMic {
     if (!(self = [super init])) return nil;
     _directory = directory;
+    _withSystem = withSystem;
     _withMic = withMic;
     _control = dispatch_queue_create("local.bicord.routes", DISPATCH_QUEUE_SERIAL);
     _systemSegments = [NSMutableArray array];
@@ -446,16 +448,18 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
 }
 
 - (void)reconcileRoutes {
-    AudioObjectID output = defaultDevice(kAudioHardwarePropertyDefaultOutputDevice);
-    AudioObjectID input = defaultDevice(kAudioHardwarePropertyDefaultInputDevice);
-    AudioStreamBasicDescription format = {0};
-    BOOL formatChanged = _systemRunning && tapFormat(_tap, &format) == noErr &&
-        memcmp(&format, &_tapFormat, sizeof(format)) != 0;
-    if (!_systemRunning || output != _outputDevice || formatChanged) {
-        [self closeSystem];
-        _systemIssue = [self startSystem:output];
-        if (_systemIssue) [self closeSystem];
+    if (_withSystem) {
+        AudioObjectID output = defaultDevice(kAudioHardwarePropertyDefaultOutputDevice);
+        AudioStreamBasicDescription format = {0};
+        BOOL formatChanged = _systemRunning && tapFormat(_tap, &format) == noErr &&
+            memcmp(&format, &_tapFormat, sizeof(format)) != 0;
+        if (!_systemRunning || output != _outputDevice || formatChanged) {
+            [self closeSystem];
+            _systemIssue = [self startSystem:output];
+            if (_systemIssue) [self closeSystem];
+        }
     }
+    AudioObjectID input = defaultDevice(kAudioHardwarePropertyDefaultInputDevice);
     BOOL micFormatChanged = _engine.isRunning && ![[_engine.inputNode outputFormatForBus:0] isEqual:_mic.format];
     if (_withMic && (!_engine.isRunning || input != _inputDevice || micFormatChanged)) {
         [self closeMic];
@@ -525,14 +529,14 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
         [self closeMic];
     });
     *warning = routeIssue;
-    return exportSegments(_systemSegments, _micSegments, _withMic, destination, warning);
+    return exportSegments(_systemSegments, _micSegments, _withSystem, _withMic, destination, warning);
 }
 @end
 
-void *sy_start(const char *directory, bool microphone, char **error) {
+void *sy_start(const char *directory, bool system, bool microphone, char **error) {
     @autoreleasepool {
         SYRecorder *recorder = [[SYRecorder alloc] initWithDirectory:
-            [NSURL fileURLWithPath:[NSString stringWithUTF8String:directory] isDirectory:YES] withMic:microphone];
+            [NSURL fileURLWithPath:[NSString stringWithUTF8String:directory] isDirectory:YES] withSystem:system withMic:microphone];
         NSString *issue = [recorder start];
         if (issue) {
             *error = strdup(issue.UTF8String);
