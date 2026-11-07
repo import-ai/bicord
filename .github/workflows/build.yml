@@ -42,8 +42,22 @@ jobs:
           workspaces: src-tauri
           key: ${{ matrix.target }}
       - run: npm ci
-      - name: Build DMG
+      - name: Build PR DMG
+        if: github.event_name == 'pull_request'
         run: npm run tauri build -- --ci --target ${{ matrix.target }} --bundles dmg -- --locked
+      - name: Build signed DMG
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.CSC_LINK }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE:?Missing CSC_LINK}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?Missing CSC_KEY_PASSWORD}"
+          : "${APPLE_SIGNING_IDENTITY:?Missing APPLE_SIGNING_IDENTITY}"
+          npm run tauri build -- --ci --target ${{ matrix.target }} --bundles dmg -- --locked
       - name: Prepare installer artifact
         id: installer
         shell: bash
@@ -66,6 +80,31 @@ jobs:
           filename="bicord-v${version}${suffix}-${ARCH}.dmg"
           mv "${installers[0]}" "src-tauri/target/${filename}"
           echo "path=src-tauri/target/${filename}" >> "$GITHUB_OUTPUT"
+      - name: Notarize and verify DMG
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          INSTALLER: ${{ steps.installer.outputs.path }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_API_KEY_BASE64:?Missing APPLE_API_KEY}"
+          : "${APPLE_API_KEY_ID:?Missing APPLE_API_KEY_ID}"
+          : "${APPLE_API_ISSUER:?Missing APPLE_API_ISSUER}"
+          codesign --verify --strict "$INSTALLER"
+          umask 077
+          key_path="$RUNNER_TEMP/bicord-notary.p8"
+          trap 'unlink "$key_path"' EXIT
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$key_path"
+          result=$(xcrun notarytool submit "$INSTALLER" --key "$key_path" \
+            --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
+            --wait --timeout 20m --output-format json)
+          printf '%s\n' "$result"
+          jq -e '.status == "Accepted"' <<< "$result" >/dev/null
+          xcrun stapler staple "$INSTALLER"
+          xcrun stapler validate "$INSTALLER"
       - name: Upload installer
         uses: actions/upload-artifact@v7
         with:

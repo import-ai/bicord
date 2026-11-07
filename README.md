@@ -34,4 +34,4 @@ xcrun clang -fobjc-arc -fblocks -mmacosx-version-min=14.2 \
 
 ## CI
 
-GitHub Actions 为 Apple Silicon 和 Intel Mac 构建 DMG。推送到 `main`、创建 `v*` 标签或提交 PR 时会触发构建，也可以手动运行。安装包在对应运行的 Artifacts 中下载，使用 ad-hoc 签名。
+GitHub Actions 为 Apple Silicon 和 Intel Mac 构建 DMG。推送到 `main`、创建 `v*` 标签或提交 PR 时会触发构建，也可以手动运行。安装包在对应运行的 Artifacts 中下载。主分支、版本标签和手动构建的 DMG 使用 import-ai 的 Developer ID 签名，并附上 Apple 公证票据。PR 构建使用 ad-hoc 应用签名。
