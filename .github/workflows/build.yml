@@ -103,8 +103,17 @@ jobs:
             --wait --timeout 20m --output-format json)
           printf '%s\n' "$result"
           jq -e '.status == "Accepted"' <<< "$result" >/dev/null
-          xcrun stapler staple "$INSTALLER"
-          xcrun stapler validate "$INSTALLER"
+          retry_stapler() {
+            for delay in 5 10 20; do
+              if xcrun stapler "$@"; then
+                return
+              fi
+              sleep "$delay"
+            done
+            xcrun stapler "$@"
+          }
+          retry_stapler staple "$INSTALLER"
+          retry_stapler validate "$INSTALLER"
       - name: Upload installer
         uses: actions/upload-artifact@v7
         with:
