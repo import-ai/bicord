@@ -1,3 +1,5 @@
+<img src="./src-tauri/icons/icon.svg" alt="Bicord logo" width="112" height="112">
+
 # Bicord
 
 **只专注一件事。把你听到的和你说的录在一起。**
