@@ -1,35 +1,31 @@
 # Bicord
 
-Bicord 是一款 macOS 录音应用，可同时录制系统声音和麦克风，并保存为同一个 M4A 文件。需要 macOS 14.2 或更新版本。
+**只专注一件事。把你听到的和你说的录在一起。**
 
-打开 `Bicord.app`，点击「开始录音」，按 macOS 提示允许系统音频录制和麦克风访问。系统声音和麦克风默认开启，可在录音前分别关闭，开始录音时至少需要开启一路。界面会显示 macOS 当前输入和输出设备，录音中的设备切换会接入同一次录音，设备重新连接时可能有短暂静音。
+Bicord 是一款 macOS 录音应用，同时录制系统声音和麦克风，保存为一份本地 M4A 文件。
 
-点击「停止并保存」后，合成的 M4A 文件默认保存在 `~/bicord`。可在「录音文件」中点击「更改目录」，应用会记住选择，并显示该目录中的录音。可以从应用内播放文件，或在 Finder 中定位。录音期间，原始音频片段保存在同一目录下的隐藏子目录，导出成功后会清理。导出失败时，界面会显示原始片段的路径。
+[下载 Bicord](https://github.com/import-ai/bicord/actions/workflows/build.yml?query=branch%3Amain+is%3Asuccess)
 
-## 构建
+## 录音前，一眼确认两路声音
 
-在本目录运行。需要 Node.js 22.12+、Rust 和 Xcode Command Line Tools。
+- **自己选音源。** 系统声音和麦克风各有开关，两路都开可以同时录制，只开一路也可以录。
+- **看得见声音。** 两路实时电平分别显示，方便确认系统声音和麦克风有没有收到信号。
+- **换耳机，接着录。** Bicord 跟随 macOS 当前的输入和输出设备，录音中切换设备后，声音仍会录进同一个文件。设备重新连接时可能短暂静音。
+- **录音留在 Mac 上。** 默认保存到 `~/bicord`，也可以选自己的文件夹。录完可以在列表里播放，或直接在 Finder 中找到。
 
-```sh
-npm ci
-npm run tauri build -- --bundles app
-open src-tauri/target/release/bundle/macos/Bicord.app
-```
+## 安装
 
-本机产物使用 ad-hoc 签名。录音验收请使用 `.app`，让 macOS 按应用识别权限。
+需要 macOS 14.2 或更新版本。登录 GitHub，打开[最新一条成功的构建](https://github.com/import-ai/bicord/actions/workflows/build.yml?query=branch%3Amain+is%3Asuccess)，在页面底部的 **Artifacts** 下载适合你 Mac 的安装包。
 
-## 验证混音
+| 你的 Mac | 选择的安装包 |
+| --- | --- |
+| Apple 芯片 | `-arm64.dmg` |
+| Intel 芯片 | `-amd64.dmg` |
 
-```sh
-xcrun clang -fobjc-arc -fblocks -mmacosx-version-min=14.2 \
-  src-tauri/native/recorder-test.m -o /tmp/bicord-recorder-test \
-  -framework AppKit -framework Foundation -framework AVFoundation -framework AudioToolbox \
-  -framework CoreAudio -framework CoreMedia
-/tmp/bicord-recorder-test
-```
+打开 DMG，把 Bicord 拖到「应用程序」。安装包已签名并通过 Apple 公证。
 
-测试用四种不同频率的合成音模拟设备切换，验证导出的 M4A 保留切换前后的系统声和麦克风、采样率变化及两路起始时间差。
+## 开始录音
 
-## CI
-
-GitHub Actions 为 Apple Silicon 和 Intel Mac 构建 DMG。推送到 `main`、创建 `v*` 标签或提交 PR 时会触发构建，也可以手动运行。安装包在对应运行的 Artifacts 中下载。主分支、版本标签和手动构建的 DMG 使用 import-ai 的 Developer ID 签名，并附上 Apple 公证票据。PR 构建使用 ad-hoc 应用签名。
+1. 打开 Bicord，选择音源。系统声音和麦克风默认开启。
+2. 点击「开始录音」。首次录制时，按 macOS 提示允许访问你选用的音源。
+3. 点击「停止并保存」。录音会出现在文件列表里，可随时播放或在 Finder 中打开。
