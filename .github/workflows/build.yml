@@ -1,0 +1,75 @@
+name: Desktop build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            arch: arm64
+          - name: macOS Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Build DMG
+        run: npm run tauri build -- --ci --target ${{ matrix.target }} --bundles dmg -- --locked
+      - name: Prepare installer artifact
+        id: installer
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          installers=("src-tauri/target/${TARGET}/release/bundle/dmg/"*.dmg)
+          if [[ ${#installers[@]} -ne 1 ]]; then
+            echo "Expected one DMG, found ${#installers[@]}" >&2
+            exit 1
+          fi
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          suffix=""
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            suffix="-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          filename="bicord-v${version}${suffix}-${ARCH}.dmg"
+          mv "${installers[0]}" "src-tauri/target/${filename}"
+          echo "path=src-tauri/target/${filename}" >> "$GITHUB_OUTPUT"
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          if-no-files-found: error
+          path: ${{ steps.installer.outputs.path }}
