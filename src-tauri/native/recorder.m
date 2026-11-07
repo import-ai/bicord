@@ -329,7 +329,7 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
     if (status != noErr) return statusError(@"无法创建系统音频采集，请检查系统音频录制权限", status);
 
     NSDictionary *aggregateConfig = @{
-        @kAudioAggregateDeviceNameKey: @"bicord",
+        @kAudioAggregateDeviceNameKey: @"Bicord",
         @kAudioAggregateDeviceUIDKey: NSUUID.UUID.UUIDString,
         @kAudioAggregateDeviceIsPrivateKey: @YES,
         @kAudioAggregateDeviceTapListKey: @[@{
@@ -480,7 +480,7 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
             permission = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
         }
         if (permission != AVAuthorizationStatusAuthorized) {
-            return @"请在「系统设置 → 隐私与安全性 → 麦克风」允许bicord访问。";
+            return @"请在「系统设置 → 隐私与安全性 → 麦克风」允许 Bicord 访问。";
         }
     }
 

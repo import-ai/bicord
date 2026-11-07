@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
+import bicordIcon from "../src-tauri/icons/icon.svg?no-inline"
 import "./index.css"
 
 type AudioStatus = {
@@ -177,12 +178,10 @@ function App() {
     <div className="flex flex-col gap-4 p-4">
       <header className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <span className="grid size-9 place-items-center rounded-md border bg-muted">
-            <AudioLines className="size-5" />
-          </span>
+          <img src={bicordIcon} alt="" className="size-11 shrink-0" />
           <div>
-            <h1 className="text-xl leading-tight font-semibold tracking-tight">bicord</h1>
-            <p className="text-sm text-muted-foreground">会议录音</p>
+            <h1 className="text-xl leading-tight font-semibold tracking-tight">Bicord</h1>
+            <p className="text-sm text-muted-foreground">系统内录 + 麦克风</p>
           </div>
         </div>
         <Badge variant="outline"><HardDrive />本机保存</Badge>
@@ -193,7 +192,7 @@ function App() {
           <CardHeader className="px-4">
             <CardTitle id="recorder-title">录音台</CardTitle>
             <CardDescription>
-              {active ? "录音会跟随当前音频设备。" : noSources ? "请至少开启一路音频。" : "录下会议里听到的，也录下你说的。"}
+              {active ? "录音会跟随当前音频设备。" : noSources ? "请至少开启一路音频。" : "可将两路声音同时录进一个 M4A 文件。"}
             </CardDescription>
             <CardAction>
               <Badge role="status" variant={active && !phase ? "destructive" : "secondary"}>
@@ -289,7 +288,7 @@ function App() {
       </main>
 
       <footer className="flex justify-between gap-4 text-xs text-muted-foreground">
-        <span className="shrink-0">bicord · macOS</span>
+        <span className="shrink-0">Bicord · macOS</span>
         <span className="truncate" title={library?.directory}>{library?.directory}</span>
       </footer>
     </div>

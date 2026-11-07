@@ -192,7 +192,7 @@ fn start(app: &AppHandle, system_audio: bool, microphone: bool) -> Result<Status
 
     let result = (|| {
         let now = Local::now();
-        let name = format!("会议录音 {}.m4a", now.format("%Y-%m-%d %H.%M.%S%.3f"));
+        let name = format!("录音 {}.m4a", now.format("%Y-%m-%d %H.%M.%S%.3f"));
         let directory = library(app)?.join(format!(".bicord-recording-{}", now.format("%s%.9f")));
         let path = c_path(&directory)?;
         fs::DirBuilder::new()
@@ -267,10 +267,13 @@ fn stop(app: &AppHandle) -> Result<Option<String>, String> {
     result.map_err(|error| format!("{error}\n原始片段目录：{}", session.directory.display()))
 }
 
-fn recording_name(name: &str) -> bool {
-    name.starts_with("会议录音 ")
-        && name.ends_with(".m4a")
-        && Path::new(name).file_name().and_then(|part| part.to_str()) == Some(name)
+fn recording_timestamp(name: &str) -> Option<&str> {
+    if Path::new(name).file_name().and_then(|part| part.to_str()) != Some(name) {
+        return None;
+    }
+    name.strip_prefix("录音 ")
+        .or_else(|| name.strip_prefix("会议录音 "))?
+        .strip_suffix(".m4a")
 }
 
 fn list(app: &AppHandle) -> Result<Library, String> {
@@ -279,7 +282,9 @@ fn list(app: &AppHandle) -> Result<Library, String> {
     for entry in fs::read_dir(&path).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !recording_name(&name) || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+        if recording_timestamp(&name).is_none()
+            || !entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {
@@ -292,7 +297,8 @@ fn list(app: &AppHandle) -> Result<Library, String> {
             bytes: metadata.len(),
         });
     }
-    recordings.sort_unstable_by(|a, b| b.name.cmp(&a.name));
+    recordings
+        .sort_unstable_by(|a, b| recording_timestamp(&b.name).cmp(&recording_timestamp(&a.name)));
     let directory = app
         .path()
         .home_dir()
@@ -354,7 +360,7 @@ async fn recording_open(app: AppHandle, name: Option<String>, reveal: bool) -> R
         let mut path = library(&app)?;
         let mut open = Command::new("/usr/bin/open");
         if let Some(name) = name {
-            if !recording_name(&name) {
+            if recording_timestamp(&name).is_none() {
                 return Err("录音名称无效。".into());
             }
             path.push(name);
@@ -402,7 +408,7 @@ fn main() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("无法启动bicord")
+        .expect("无法启动 Bicord")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if !can_exit(app) {

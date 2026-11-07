@@ -1,10 +1,8 @@
-# bicord
+# Bicord
 
-bicord 寓意双向录制，把系统声音和麦克风录进同一个文件。
+Bicord 是一款 macOS 录音应用，可同时录制系统声音和麦克风，并保存为同一个 M4A 文件。需要 macOS 14.2 或更新版本。
 
-这是一款 macOS 会议录音应用，使用 Tauri 2、React 和 shadcn/ui。需要 macOS 14.2 或更新版本。
-
-打开 `bicord.app`，点击「开始录音」，按 macOS 提示允许系统音频录制和麦克风访问。系统声音和麦克风默认开启，可在录音前分别关闭，开始录音时至少需要开启一路。界面会显示 macOS 当前输入和输出设备，录音中的设备切换会接入同一次录音，设备重新连接时可能有短暂静音。
+打开 `Bicord.app`，点击「开始录音」，按 macOS 提示允许系统音频录制和麦克风访问。系统声音和麦克风默认开启，可在录音前分别关闭，开始录音时至少需要开启一路。界面会显示 macOS 当前输入和输出设备，录音中的设备切换会接入同一次录音，设备重新连接时可能有短暂静音。
 
 点击「停止并保存」后，合成的 M4A 文件默认保存在 `~/bicord`。可在「录音文件」中点击「更改目录」，应用会记住选择，并显示该目录中的录音。可以从应用内播放文件，或在 Finder 中定位。录音期间，原始音频片段保存在同一目录下的隐藏子目录，导出成功后会清理。导出失败时，界面会显示原始片段的路径。
 
@@ -15,7 +13,7 @@ bicord 寓意双向录制，把系统声音和麦克风录进同一个文件。
 ```sh
 npm ci
 npm run tauri build -- --bundles app
-open src-tauri/target/release/bundle/macos/bicord.app
+open src-tauri/target/release/bundle/macos/Bicord.app
 ```
 
 本机产物使用 ad-hoc 签名。录音验收请使用 `.app`，让 macOS 按应用识别权限。
