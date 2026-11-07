@@ -3,13 +3,13 @@ import { createRoot } from "react-dom/client"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import {
-  Activity, ArrowUpRight, AudioLines, Check, CircleAlert, FolderOpen, FolderCog,
+  ArrowUpRight, AudioLines, Check, Circle, CircleAlert, FolderOpen, FolderCog,
   HardDrive, Headphones, LoaderCircle, Mic, Play, RefreshCw, Square, Volume2,
 } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
+import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 import "./index.css"
 
@@ -28,7 +28,6 @@ type Library = { directory: string; recordings: Recording[] }
 type Phase = "starting" | "saving" | null
 type Notice = { text: string; error: boolean }
 
-const shape = [10, 16, 24, 18, 34, 46, 22, 56, 86, 50, 32, 67, 96, 66, 38, 72, 110, 83, 50, 33, 65, 46, 26, 40, 27, 17, 23, 14, 9]
 const sizeFormat = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 })
 
 function time(seconds: number) {
@@ -51,21 +50,31 @@ function Source({ label, device, level, microphone, onToggle, disabled }: {
 }) {
   const Icon = onToggle ? Mic : Volume2
   const enabled = microphone !== false
+  const activeBars = enabled ? meter(level) * 24 : 0
+
   return (
-    <Card className="source-card">
-      <div className="source-head">
-        <span className="source-icon"><Icon size={17} strokeWidth={1.9} /></span>
-        <div className="source-text">
-          <div className="source-label">{label}</div>
-          <div className="source-device" title={device}>{enabled ? device : "已关闭麦克风"}</div>
+    <Card className="gap-4">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Icon className="size-4 text-muted-foreground" />
+          {label}
+        </CardTitle>
+        <CardDescription className="truncate" title={device}>
+          {enabled ? device : "已关闭麦克风"}
+        </CardDescription>
+        <CardAction>
+          {onToggle
+            ? <Switch checked={enabled} onCheckedChange={onToggle} disabled={disabled} aria-label="采集麦克风" />
+            : <Badge variant="secondary">始终录制</Badge>}
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-24 gap-1" aria-hidden="true">
+          {Array.from({ length: 24 }, (_, i) => (
+            <span key={i} className={i < activeBars ? "h-1.5 rounded-full bg-primary" : "h-1.5 rounded-full bg-muted"} />
+          ))}
         </div>
-        {onToggle
-          ? <Switch checked={enabled} onCheckedChange={onToggle} disabled={disabled} aria-label="采集麦克风" />
-          : <Badge className="source-badge" variant="secondary">始终录制</Badge>}
-      </div>
-      <div className="meter" aria-hidden="true">
-        {Array.from({ length: 24 }, (_, i) => <i key={i} data-on={enabled && meter(level) * 24 > i} />)}
-      </div>
+      </CardContent>
     </Card>
   )
 }
@@ -165,85 +174,99 @@ function App() {
 
   const systemLevel = phase ? 0 : audio?.systemLevel ?? 0
   const micLevel = phase ? 0 : audio?.micLevel ?? 0
-  const wave = meter(Math.max(systemLevel, micLevel))
   const stateLabel = phase === "saving" ? "正在保存" : phase === "starting" ? "正在准备" : active ? "正在录音" : "准备就绪"
   const warning = phase ? null : audio?.warning
 
   return (
-    <div className="shell">
-      <header className="app-header">
-        <div className="wordmark">
-          <span className="brand-icon"><AudioLines size={23} strokeWidth={2.2} /></span>
-          <div><span className="brand-name">bicord</span><span className="brand-subtitle">会议录音</span></div>
+    <div className="mx-auto flex max-w-4xl flex-col gap-6 p-6 md:p-8">
+      <header className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="grid size-9 place-items-center rounded-md border bg-muted">
+            <AudioLines className="size-5" />
+          </span>
+          <div>
+            <h1 className="text-xl leading-tight font-semibold tracking-tight">bicord</h1>
+            <p className="text-sm text-muted-foreground">会议录音</p>
+          </div>
         </div>
-        <Badge className="local-badge" variant="outline"><HardDrive />本机保存</Badge>
+        <Badge variant="outline"><HardDrive />本机保存</Badge>
       </header>
 
-      <main>
-        <section className="console" aria-label="录音控制">
-          <div className="console-grid" aria-hidden="true" />
-          <div className="console-content">
-            <div className="console-meta">
-              <span className="eyebrow"><Activity size={15} /> 录音台</span>
-              <span role="status" className="console-status" data-recording={active && !phase}><i />{stateLabel}</span>
+      <main className="flex flex-col gap-6">
+        <Card role="region" aria-labelledby="recorder-title">
+          <CardHeader>
+            <CardTitle id="recorder-title">录音台</CardTitle>
+            <CardDescription>
+              {active ? "录音会跟随当前音频设备。" : "录下会议里听到的，也录下你说的。"}
+            </CardDescription>
+            <CardAction>
+              <Badge role="status" variant={active && !phase ? "destructive" : "secondary"}>
+                {stateLabel}
+              </Badge>
+            </CardAction>
+          </CardHeader>
+          <CardContent>
+            <div className="font-mono text-4xl leading-none font-semibold tracking-tight tabular-nums sm:text-5xl">
+              {time(audio?.elapsed ?? 0)}
             </div>
-            <div className="counter">{time(audio?.elapsed ?? 0)}</div>
-            <p className="console-copy">{active ? "录音会跟随当前音频设备。" : "录下会议里听到的，也录下你说的。"}</p>
-            <Button className="record-button" size="lg" onClick={record} disabled={!!phase || choosingDirectory}>
+          </CardContent>
+          <CardFooter>
+            <Button onClick={record} disabled={!!phase || choosingDirectory}>
               {phase
-                ? <LoaderCircle className="animate-spin" />
-                : active ? <Square fill="currentColor" className="size-3!" /> : <span className="record-dot" />}
+                ? <LoaderCircle className="motion-safe:animate-spin" />
+                : active ? <Square fill="currentColor" /> : <Circle fill="currentColor" />}
               {phase === "saving" ? "正在保存…" : phase === "starting" ? "正在启动…" : active ? "停止并保存" : "开始录音"}
             </Button>
-          </div>
-          <div className="wave" data-active={active && !phase} aria-hidden="true">
-            {shape.map((height, i) => (
-              <span key={i} style={{ height: active ? 4 + height * wave : height * 0.88 }} />
-            ))}
-          </div>
-        </section>
+          </CardFooter>
+        </Card>
 
         {(notice || warning) && (
-          <Alert className="notice" variant={notice?.error || warning ? "destructive" : "default"}>
+          <Alert className="pr-12" variant={notice?.error || warning ? "destructive" : "default"}>
             {notice?.error || warning ? <CircleAlert /> : <Check />}
-            <AlertDescription>{warning ?? notice?.text}</AlertDescription>
-            <Button size="icon-xs" variant="ghost" className="notice-close" disabled={!notice} aria-label="关闭提示" onClick={() => setNotice(null)}>×</Button>
+            <AlertDescription className="whitespace-pre-wrap wrap-anywhere">{warning ?? notice?.text}</AlertDescription>
+            {notice && (
+              <Button size="icon-xs" variant="ghost" className="absolute top-2 right-2" aria-label="关闭提示" onClick={() => setNotice(null)}>×</Button>
+            )}
           </Alert>
         )}
 
-        <section className="section" aria-labelledby="devices-title">
-          <div className="section-head">
-            <h2 id="devices-title">音频来源</h2>
-            <span className="section-meta"><Headphones size={14} />跟随 macOS 当前设备</span>
+        <section className="space-y-3" aria-labelledby="devices-title">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 id="devices-title" className="text-base font-semibold">音频来源</h2>
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Headphones className="size-4" />跟随 macOS 当前设备
+            </span>
           </div>
-          <div className="sources">
+          <div className="grid gap-3 sm:grid-cols-2">
             <Source label="系统声音" device={audio?.outputName ?? "正在检测…"} level={systemLevel} />
             <Source label="麦克风" device={audio?.inputName ?? "正在检测…"} level={micLevel}
               microphone={audio?.microphone ?? mic} onToggle={setMic} disabled={active || !!phase} />
           </div>
         </section>
 
-        <section className="section history" aria-labelledby="recordings-title">
-          <div className="section-head">
-            <h2 id="recordings-title">录音文件 {recordings && <span className="recording-count">{recordings.length}</span>}</h2>
-            <div className="history-actions">
+        <section className="space-y-3" aria-labelledby="recordings-title">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 id="recordings-title" className="flex items-center gap-2 text-base font-semibold">
+              录音文件 {recordings && <Badge variant="secondary">{recordings.length}</Badge>}
+            </h2>
+            <div className="flex flex-wrap items-center gap-2">
               <Button size="icon-sm" variant="ghost" disabled={refreshing || choosingDirectory} onClick={refresh} aria-label="刷新录音列表" title="刷新录音列表">
-                <RefreshCw className={refreshing ? "animate-spin" : ""} />
+                <RefreshCw className={refreshing ? "motion-safe:animate-spin" : ""} />
               </Button>
               <Button size="sm" variant="outline" disabled={choosingDirectory} onClick={() => open()}><FolderOpen />打开文件夹</Button>
               <Button size="sm" variant="outline" disabled={active || !!phase || choosingDirectory || refreshing}
                 onClick={chooseDirectory}><FolderCog />更改目录</Button>
             </div>
           </div>
-          <Card className="history-card">
+          <Card className="py-0">
             {recordings?.length ? (
-              <ul>
+              <ul className="divide-y">
                 {recordings.map(recording => (
-                  <li className="recording" key={recording.name}>
-                    <span className="file-icon"><AudioLines size={18} /></span>
-                    <div className="file-text">
-                      <div className="file-name" title={recording.name}>{recording.name.replace(/(\d{2})\.(\d{2})\.(\d{2})\.\d{3}\.m4a$/, "$1:$2:$3")}</div>
-                      <div className="file-details">
+                  <li className="flex items-center gap-3 px-4 py-3" key={recording.name}>
+                    <AudioLines className="size-5 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium" title={recording.name}>{recording.name.replace(/(\d{2})\.(\d{2})\.(\d{2})\.\d{3}\.m4a$/, "$1:$2:$3")}</div>
+                      <div className="text-xs text-muted-foreground">
                         M4A · {time(recording.duration)} · {sizeFormat.format(recording.bytes / 1024 ** 2)} MB
                       </div>
                     </div>
@@ -254,19 +277,22 @@ function App() {
                 ))}
               </ul>
             ) : (
-              <div className="empty">
-                <span className="file-icon"><AudioLines size={18} /></span>
+              <CardContent className="flex items-center gap-3 py-4">
+                <AudioLines className="size-5 shrink-0 text-muted-foreground" />
                 <div>
-                  <p>{refreshing ? "正在读取录音…" : recordings ? "还没有录音" : "录音列表暂不可用"}</p>
-                  <p>{recordings ? "停止录音后，M4A 文件会出现在这里。" : "可以刷新列表或打开录音文件夹。"}</p>
+                  <p className="text-sm font-medium">{refreshing ? "正在读取录音…" : recordings ? "还没有录音" : "录音列表暂不可用"}</p>
+                  <p className="text-xs text-muted-foreground">{recordings ? "停止录音后，M4A 文件会出现在这里。" : "可以刷新列表或打开录音文件夹。"}</p>
                 </div>
-              </div>
+              </CardContent>
             )}
           </Card>
         </section>
       </main>
 
-      <footer><span>bicord · macOS</span><span className="save-directory" title={library?.directory}>{library?.directory}</span></footer>
+      <footer className="flex justify-between gap-4 text-xs text-muted-foreground">
+        <span className="shrink-0">bicord · macOS</span>
+        <span className="truncate" title={library?.directory}>{library?.directory}</span>
+      </footer>
     </div>
   )
 }
