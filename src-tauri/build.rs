@@ -1,7 +1,9 @@
 fn main() {
     println!("cargo:rerun-if-changed=native/recorder.m");
+    println!("cargo:rerun-if-changed=native/diagnostics.m");
+    println!("cargo:rerun-if-changed=native/diagnostics.h");
     cc::Build::new()
-        .file("native/recorder.m")
+        .files(["native/recorder.m", "native/diagnostics.m"])
         .flags(["-fobjc-arc", "-fblocks", "-mmacosx-version-min=14.2"])
         .compile("bicord_recorder");
     for framework in [

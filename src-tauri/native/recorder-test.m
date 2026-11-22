@@ -13,6 +13,13 @@
 }
 @end
 
+@interface RouteTestRecorder : SYRecorder
+@property BOOL failRoute;
+@end
+@implementation RouteTestRecorder
+- (NSString *)startSystem:(__unused AudioObjectID)output { return self.failRoute ? @"Simulated Core Audio -50" : nil; }
+@end
+
 static void recoveryTests(NSURL *root) {
     NSURL *directory = [root URLByAppendingPathComponent:@"recovery" isDirectory:YES];
     assert([NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:NO attributes:nil error:NULL]);
@@ -113,6 +120,7 @@ int main(int argc, const char *argv[]) {
         char tmp[] = "/tmp/bicord-test.XXXXXX";
         assert(mkdtemp(tmp));
         NSURL *directory = [NSURL fileURLWithFileSystemRepresentation:tmp isDirectory:YES relativeToURL:nil];
+        assert(sy_log_init([[directory URLByAppendingPathComponent:@"logs"] path].UTF8String));
         UInt64 start = AudioGetCurrentHostTime();
         SYTrack *system = tone(directory, @"system-a.caf", 440, 48000, 2, start);
         SYTrack *mic = tone(directory, @"mic-a.caf", 730, 48000, 1, start + AudioConvertNanosToHostTime(300000000));
@@ -192,6 +200,29 @@ int main(int argc, const char *argv[]) {
         assert([NSFileManager.defaultManager fileExistsAtPath:[[directory URLByAppendingPathComponent:@"capture.closed"] path]]);
         assert(fabs(sy_duration(lastChunk.url.path.UTF8String) - 1) < 0.001);
         puts("Native macOS termination drained and sealed the current chunk.");
+        RouteTestRecorder *routes = [[RouteTestRecorder alloc] initWithDirectory:directory withSystem:YES withMic:NO];
+        routes.failRoute = YES;
+        for (int i = 0; i < 3; i++) [routes reconcileRoutes];
+        routes.failRoute = NO;
+        [routes reconcileRoutes];
+        sy_log_flush();
+        NSString *log = [NSString stringWithContentsOfURL:[directory URLByAppendingPathComponent:@"logs/bicord.log"] encoding:NSUTF8StringEncoding error:NULL];
+        NSMutableSet *events = [NSMutableSet set];
+        int deviceFailures = 0;
+        BOOL diskError = NO;
+        for (NSString *line in [log componentsSeparatedByString:@"\n"]) {
+            if (!line.length) continue;
+            NSDictionary *entry = [NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+            assert(entry);
+            [events addObject:entry[@"event"]];
+            if ([entry[@"event"] isEqual:@"device.system.failed"]) deviceFailures++;
+            if ([entry[@"event"] isEqual:@"chunk.reopen.failed"]) diskError = [entry[@"details"][@"error"][@"code"] intValue] == ENOSPC;
+        }
+        for (NSString *event in @[@"chunk.closed", @"chunk.reopen.failed", @"chunk.write.recovered", @"capture.clock.discontinuity",
+                @"chunk.drain.timeout", @"capture.stop.timeout", @"device.status.timeout", @"export.failed", @"export.completed",
+                @"recording.publish.failed", @"device.system.failed", @"device.system.connected", @"capture.sealed"]) assert([events containsObject:event]);
+        assert(deviceFailures == 1 && diskError);
+        puts("Recording, route failures, recovery and export diagnostics were persisted with error codes and deduplicated retries.");
         assert([NSFileManager.defaultManager removeItemAtURL:directory error:NULL]);
         puts("M4A mix preserved both sources before and after a device format change.");
     }

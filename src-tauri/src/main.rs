@@ -16,6 +16,9 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 extern "C" {
+    fn sy_log_init(directory: *const c_char) -> bool;
+    fn sy_log_json(level: *const c_char, event: *const c_char, fields: *const c_char);
+    fn sy_log_flush();
     fn sy_start(
         path: *const c_char,
         system: bool,
@@ -40,6 +43,31 @@ extern "C" {
     fn sy_choose_directory(path: *const c_char) -> *mut c_char;
     fn sy_duration(path: *const c_char) -> f64;
     fn sy_free(value: *mut c_char);
+}
+
+fn log_event(level: &str, event: &str, fields: serde_json::Value) {
+    let (Ok(level), Ok(event), Ok(fields)) = (
+        CString::new(level),
+        CString::new(event),
+        CString::new(fields.to_string()),
+    ) else {
+        return;
+    };
+    unsafe {
+        sy_log_json(level.as_ptr(), event.as_ptr(), fields.as_ptr());
+    }
+}
+
+fn log_result<T>(event: &str, result: &Result<T, String>, fields: serde_json::Value) {
+    let mut details = fields;
+    if let Err(error) = result {
+        details["error"] = serde_json::json!(error);
+    }
+    log_event(
+        if result.is_err() { "error" } else { "info" },
+        event,
+        details,
+    );
 }
 
 struct NativeRecorder(NonNull<c_void>);
@@ -221,6 +249,11 @@ fn start(app: &AppHandle, system_audio: bool, microphone: bool) -> Result<Status
         return Err("已有一场录音正在进行。".into());
     }
 
+    log_event(
+        "info",
+        "recording.start.requested",
+        serde_json::json!({"systemAudio": system_audio, "microphone": microphone}),
+    );
     let result = (|| {
         let now = Local::now();
         let name = format!("录音 {}.m4a", now.format("%Y-%m-%d %H.%M.%S%.3f"));
@@ -262,6 +295,7 @@ fn start(app: &AppHandle, system_audio: bool, microphone: bool) -> Result<Status
         });
         Ok(())
     })();
+    log_result("recording.start.result", &result, serde_json::json!({}));
     if result.is_err() {
         state.busy.store(false, Ordering::Release);
     }
@@ -294,8 +328,19 @@ fn publish_session(
     if let Some(error) = take_string(unsafe { sy_publish(source.as_ptr(), destination.as_ptr()) }) {
         return Err(format!("无法保存 M4A。{error}"));
     }
+    log_event(
+        "info",
+        "recording.published",
+        serde_json::json!({"session": directory.file_name().and_then(|name| name.to_str()), "name": name, "warning": notice}),
+    );
     if notice.is_none() {
-        let _ = fs::remove_dir_all(directory);
+        if let Err(error) = fs::remove_dir_all(directory) {
+            log_event(
+                "warning",
+                "recording.cleanup.failed",
+                serde_json::json!({"directory": directory, "error": error.to_string()}),
+            );
+        }
     } else {
         // Keep source audio when an incomplete export was reported.
         let _ = fs::write(directory.join("published"), name);
@@ -320,6 +365,11 @@ fn stop(app: &AppHandle) -> Result<Option<String>, String> {
         .map_err(|error| error.to_string())?
         .take()
         .ok_or("当前没有进行中的录音。")?;
+    log_event(
+        "info",
+        "recording.stop.requested",
+        serde_json::json!({"session": session.directory.file_name().and_then(|name| name.to_str()), "elapsedSeconds": session.started.elapsed().as_secs_f64()}),
+    );
     let result = (|| {
         let pending = export_path(&session.directory);
         let path = c_path(&pending)?;
@@ -341,6 +391,11 @@ fn stop(app: &AppHandle) -> Result<Option<String>, String> {
         publish_session(&session.directory, &session.name, &pending, notice)
     })();
     state.busy.store(false, Ordering::Release);
+    log_result(
+        "recording.stop.result",
+        &result,
+        serde_json::json!({"session": session.directory.file_name().and_then(|name| name.to_str()), "directory": session.directory}),
+    );
     result.map_err(|error| {
         format!(
             "{error}\n原始片段已保留，可重试导出：{}",
@@ -384,6 +439,11 @@ fn retry(app: &AppHandle, id: &str) -> Result<Option<String>, String> {
     {
         return Err("请等待当前录音或导出完成。".into());
     }
+    log_event(
+        "info",
+        "recording.retry.requested",
+        serde_json::json!({"session": id}),
+    );
     let result = (|| {
         let directory = library(app)?.join(id);
         let recovery = read_recovery(&directory).ok_or("找不到待恢复录音。")?;
@@ -409,6 +469,11 @@ fn retry(app: &AppHandle, id: &str) -> Result<Option<String>, String> {
         publish_session(&directory, &recovery.name, &pending, notice)
     })();
     state.busy.store(false, Ordering::Release);
+    log_result(
+        "recording.retry.result",
+        &result,
+        serde_json::json!({"session": id}),
+    );
     result
 }
 
@@ -476,9 +541,17 @@ fn list(app: &AppHandle) -> Result<Library, String> {
 async fn background<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(work)
+    let result = tauri::async_runtime::spawn_blocking(work)
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = &result {
+        log_event(
+            "error",
+            "command.failed",
+            serde_json::json!({"error": error}),
+        );
+    }
+    result
 }
 
 #[tauri::command]
@@ -555,6 +628,7 @@ fn can_exit(app: &AppHandle) -> bool {
     if state.quitting.swap(true, Ordering::AcqRel) {
         return false;
     }
+    log_event("info", "application.quit.requested", serde_json::json!({}));
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Recorder>();
@@ -571,6 +645,10 @@ fn can_exit(app: &AppHandle) -> bool {
         if let Some(session) = session {
             session.native.close();
         }
+        log_event("info", "application.quit.ready", serde_json::json!({}));
+        unsafe {
+            sy_log_flush();
+        }
         state.exit_ready.store(true, Ordering::Release);
         app.exit(0);
     });
@@ -580,6 +658,24 @@ fn can_exit(app: &AppHandle) -> bool {
 fn main() {
     tauri::Builder::default()
         .manage(Recorder::default())
+        .setup(|app| {
+            if let Ok(home) = app.path().home_dir() {
+                if let Ok(path) = c_path(&home.join("Library/Logs/Bicord")) {
+                    unsafe { sy_log_init(path.as_ptr()); }
+                }
+            }
+            log_event("info", "application.started", serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"), "commit": option_env!("GITHUB_SHA").unwrap_or("local"),
+                "arch": std::env::consts::ARCH
+            }));
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |panic| {
+                log_event("error", "application.panic", serde_json::json!({"error": panic.to_string()}));
+                unsafe { sy_log_flush(); }
+                previous(panic);
+            }));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             recording_start,
             recording_status,

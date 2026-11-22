@@ -46,10 +46,14 @@ jobs:
         run: |
           npm run build
           xcrun clang -fobjc-arc -fblocks -mmacosx-version-min=14.2 -Wall -Wextra -Werror \
-            src-tauri/native/recorder-test.m -o "$RUNNER_TEMP/bicord-recorder-test" \
+            src-tauri/native/recorder-test.m src-tauri/native/diagnostics.m -o "$RUNNER_TEMP/bicord-recorder-test" \
             -framework AppKit -framework Foundation -framework AVFoundation \
             -framework AudioToolbox -framework CoreAudio -framework CoreMedia
           "$RUNNER_TEMP/bicord-recorder-test"
+          xcrun clang -fobjc-arc -fblocks -mmacosx-version-min=14.2 -Wall -Wextra -Werror \
+            src-tauri/native/diagnostics-test.m src-tauri/native/diagnostics.m \
+            -framework Foundation -framework AppKit -o "$RUNNER_TEMP/bicord-diagnostics-test"
+          "$RUNNER_TEMP/bicord-diagnostics-test"
           cargo test --manifest-path src-tauri/Cargo.toml --locked
       - name: Build PR DMG
         if: github.event_name == 'pull_request'

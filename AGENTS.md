@@ -9,6 +9,7 @@ Bicord 是一款 macOS 本地录音应用，专注于将系统声音和麦克风
 | `src/main.tsx`、`src/index.css` | React、TypeScript 和 shadcn/ui 界面，包括音源开关、电平、录音控制和文件列表 |
 | `src-tauri/src/main.rs` | Tauri 命令、录音会话、目录设置、文件列表和保存 |
 | `src-tauri/native/recorder.m` | Core Audio 系统内录、AVAudioEngine 麦克风采集、设备跟随、混音和 M4A 导出 |
+| `src-tauri/native/diagnostics.m`、`diagnostics.h` | 本地结构化日志、轮转及原生/Rust 日志桥接 |
 | `src-tauri/native/recorder-test.m` | 原生混音、单路导出和保存行为的回归验证 |
 | `src-tauri/tauri.conf.json`、`src-tauri/Info.plist`、`src-tauri/Entitlements.plist` | 应用标识、窗口配置、macOS 权限说明和签名权限 |
 | `src-tauri/icons/icon.svg` | 界面与应用图标的源文件。修改后需重新生成同目录下的 `icon.png` 和 `icon.icns` |
@@ -58,13 +59,34 @@ cp "$icon_output/icon.png" "$icon_output/icon.icns" src-tauri/icons/
 
 ```sh
 xcrun clang -fobjc-arc -fblocks -mmacosx-version-min=14.2 \
-  src-tauri/native/recorder-test.m -o /tmp/bicord-recorder-test \
+  src-tauri/native/recorder-test.m src-tauri/native/diagnostics.m -o /tmp/bicord-recorder-test \
   -framework AppKit -framework Foundation -framework AVFoundation -framework AudioToolbox \
   -framework CoreAudio -framework CoreMedia
 /tmp/bicord-recorder-test
 ```
 
 测试用四种频率的合成音模拟设备切换，验证 M4A 保留切换前后的系统声音和麦克风输入、采样率变化及两路起始时间差。测试还检查两种单路导出、31 分钟合成音分块后丢弃内存对象再恢复、导出失败后重试、模拟磁盘不可写后恢复、损坏片段跳过、巨大时间戳跳变，以及保存时拒绝覆盖同名文件的行为。`cargo test --manifest-path src-tauri/Cargo.toml --locked` 检查恢复元数据、成品冲突保护和部分导出保留原件。CI 同样运行这些检查。改动采集逻辑后，在实际 Mac 上分别验收双路、仅系统声音和仅麦克风三种录音。
+
+## 本地诊断日志
+
+日志路径为 `~/Library/Logs/Bicord/bicord.log`，每行独立 JSON，包含 UTC 毫秒时间、级别、事件、进程 ID 和事件详情。录音相关事件使用隐藏录音目录名作为 `session`，可以关联 Rust 命令、原生采集、设备连接、分块和导出流程。启动事件还包含应用版本、CI 提交 SHA、架构和 macOS 版本。
+
+记录录音开始/停止、片段创建/封闭、磁盘写入和同步失败、缓冲丢失、时钟异常、设备变更和重新连接、设备错误及恢复、读取和拼接失败、编码超时、重试、成品发布及退出。NSError 保留 domain、code、描述和一层底层错误；带录音目录的事件在日志线程上查询该卷的可用空间。重复设备错误和状态超时只在状态变化时记录，避免轮询刷屏。
+
+单文件上限 2 MiB，保留当前文件及 `.1` 到 `.4` 四个归档，总量不超过约 10 MiB。目录权限为 0700，新日志文件权限为 0600。仅保存在本机，不记录音频内容，不自动上传；错误描述可能包含保存路径，设备名也会出现在日志中。
+
+日志使用独立串行队列，最多排队 128 条；音频回调不做日志文件 I/O。队列满时丢弃日志，下一条记录包含 `droppedEvents`。退出时每次等待日志排空最多 1 秒，日志目录不可写、磁盘满或日志写入卡住不得阻止录音和退出；此时本地日志可能不完整，写入错误回退到系统控制台。
+
+日志回归测试：
+
+```sh
+xcrun clang -fobjc-arc -fblocks -mmacosx-version-min=14.2 -Wall -Wextra -Werror \
+  src-tauri/native/diagnostics-test.m src-tauri/native/diagnostics.m \
+  -framework Foundation -framework AppKit -o /tmp/bicord-diagnostics-test
+/tmp/bicord-diagnostics-test
+```
+
+测试覆盖 JSON 行、时间和错误码、底层错误、并发写入、文件权限、轮转空间上限及日志文件不可写。原生录音回归测试还核对写入、恢复、设备重连、停止超时和导出事件实际落盘，以及同一设备错误重试不会重复刷屏。以上测试都在 CI 中运行。
 
 ## CI、签名和公证
 
