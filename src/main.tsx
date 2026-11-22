@@ -1,7 +1,6 @@
 import { StrictMode, useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { invoke } from "@tauri-apps/api/core"
-import { listen } from "@tauri-apps/api/event"
 import {
   ArrowUpRight, AudioLines, Check, Circle, CircleAlert, FolderOpen, FolderCog,
   HardDrive, Headphones, LoaderCircle, Mic, Play, RefreshCw, Square, Volume2, type LucideIcon,
@@ -26,7 +25,7 @@ type AudioStatus = {
 }
 
 type Recording = { name: string; duration: number; bytes: number }
-type Library = { directory: string; recordings: Recording[] }
+type Library = { directory: string; recordings: Recording[]; pending: { id: string; name: string }[] }
 type Phase = "starting" | "saving" | null
 type Notice = { text: string; error: boolean }
 
@@ -104,10 +103,7 @@ function App() {
 
   useEffect(() => {
     void refresh()
-    const subscription = listen("recording-close-blocked", () => {
-      setNotice({ text: "请先停止录音并等待文件保存，然后再退出。", error: false })
-    })
-    return () => { void subscription.then(unlisten => unlisten()).catch(() => {}) }
+
   }, [])
 
   useEffect(() => {
@@ -142,8 +138,20 @@ function App() {
     } catch (error) {
       report(error)
     } finally {
+      setAudio(await invoke<AudioStatus>("recording_status").catch(() => null))
+      await refresh()
       setPhase(null)
     }
+  }
+
+  async function retry(id: string) {
+    setPhase("saving")
+    setNotice(null)
+    try {
+      const warning = await invoke<string | null>("recording_retry", { id })
+      setNotice({ text: warning ?? "录音已恢复并保存。", error: !!warning })
+    } catch (error) { report(error) }
+    finally { await refresh(); setPhase(null) }
   }
 
   async function chooseDirectory() {
@@ -241,6 +249,25 @@ function App() {
               enabled={audio?.microphone ?? mic} onToggle={setMic} disabled={active || !!phase} />
           </CardContent>
         </Card>
+
+        {!!library?.pending.length && (
+          <Card className="gap-3 py-4">
+            <CardHeader className="px-4">
+              <CardTitle>待保存的录音</CardTitle>
+              <CardDescription>已有片段保存在本机，可以重试导出，也可以退出后再继续。</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 px-4">
+              {library.pending.map(item => (
+                <div key={item.id} className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm" title={item.name}>{item.name}</span>
+                  <Button size="sm" variant="outline" disabled={active || !!phase} onClick={() => retry(item.id)}>
+                    <RefreshCw />重试导出
+                  </Button>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
 
         <section className="space-y-3" aria-labelledby="recordings-title">
           <div className="flex flex-wrap items-center justify-between gap-2">

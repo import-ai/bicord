@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #import <stdatomic.h>
 #import <unistd.h>
+#import <fcntl.h>
 
 static NSString *statusError(NSString *operation, OSStatus status) {
     return [NSString stringWithFormat:@"%@（Core Audio %d）", operation, (int)status];
@@ -51,6 +52,11 @@ static double hostSeconds(UInt64 hostTime) {
 
 @interface SYTrack : NSObject {
     AVAudioFile *_file;
+    NSURL *_baseURL;
+    NSUInteger _chunk;
+    NSString *_writeIssue;
+    double _retryAfter;
+    BOOL _finished;
     dispatch_queue_t _writer;
     dispatch_semaphore_t _slots;
     atomic_bool _overrun;
@@ -64,12 +70,22 @@ static double hostSeconds(UInt64 hostTime) {
 @property (readonly) AVAudioFramePosition frames;
 - (instancetype)initWithURL:(NSURL *)url format:(AVAudioFormat *)format error:(NSError **)error;
 - (void)enqueue:(const AudioBufferList *)data frames:(AVAudioFrameCount)frames hostTime:(UInt64)hostTime;
-- (void)finish;
+- (instancetype)initReading:(NSURL *)url hostTime:(UInt64)hostTime;
+- (BOOL)finish;
 - (NSString *)warning;
 - (float)level;
 @end
 
 @implementation SYTrack
+- (instancetype)initReading:(NSURL *)url hostTime:(UInt64)hostTime {
+    if (!(self = [super init])) return nil;
+    AVAudioFile *file = [[AVAudioFile alloc] initForReading:url error:NULL];
+    if (!file || !file.length || !hostTime) return nil;
+    _url = url; _format = file.processingFormat; _frames = file.length; _firstHostTime = hostTime;
+    atomic_init(&_overrun, false); atomic_init(&_writeFailed, false);
+    atomic_init(&_level, 0); atomic_init(&_lastBuffer, 0);
+    return self;
+}
 - (instancetype)initWithURL:(NSURL *)url format:(AVAudioFormat *)format error:(NSError **)error {
     if (!(self = [super init])) return nil;
     _url = url;
@@ -80,19 +96,46 @@ static double hostSeconds(UInt64 hostTime) {
     atomic_init(&_writeFailed, false);
     atomic_init(&_level, 0);
     atomic_init(&_lastBuffer, 0);
+    _baseURL = url;
+    return [self openFile:error] ? self : nil;
+}
+
+- (BOOL)openFile:(NSError **)error {
     NSDictionary *settings = @{
-        AVFormatIDKey: @(kAudioFormatLinearPCM),
-        AVSampleRateKey: @(format.sampleRate),
-        AVNumberOfChannelsKey: @(format.channelCount),
-        AVLinearPCMBitDepthKey: @16
+        AVFormatIDKey: @(kAudioFormatLinearPCM), AVSampleRateKey: @(_format.sampleRate),
+        AVNumberOfChannelsKey: @(_format.channelCount), AVLinearPCMBitDepthKey: @16
     };
-    _file = [[AVAudioFile alloc] initForWriting:url settings:settings commonFormat:format.commonFormat
-                                   interleaved:format.isInterleaved error:error];
-    return _file ? self : nil;
+    _file = [[AVAudioFile alloc] initForWriting:_url settings:settings commonFormat:_format.commonFormat
+                                   interleaved:_format.isInterleaved error:error];
+    return _file != nil;
+}
+
+- (void)closeChunk {
+    _file = nil;
+    int fd = open(_url.fileSystemRepresentation, O_RDONLY);
+    if (fd >= 0) { fsync(fd); close(fd); }
+}
+
+- (void)nextChunk {
+    [self closeChunk];
+    _url = [[_baseURL URLByDeletingPathExtension] URLByAppendingPathExtension:
+        [NSString stringWithFormat:@"%lu.caf", (unsigned long)++_chunk]];
+    _frames = 0;
+    _firstHostTime = 0;
+}
+
+- (BOOL)saveBuffer:(AVAudioPCMBuffer *)buffer {
+    NSError *error = nil;
+    if ([_file writeFromBuffer:buffer error:&error]) { _frames += buffer.frameLength; return YES; }
+    @synchronized (self) { _writeIssue = error.localizedDescription ?: @"写入录音失败。"; }
+    atomic_store(&_writeFailed, true);
+    _retryAfter = hostSeconds(AudioGetCurrentHostTime()) + 1;
+    [self nextChunk];
+    return NO;
 }
 
 - (void)enqueue:(const AudioBufferList *)data frames:(AVAudioFrameCount)frames hostTime:(UInt64)hostTime {
-    if (!frames || atomic_load(&_writeFailed)) return;
+    if (!frames) return;
     if (dispatch_semaphore_wait(_slots, DISPATCH_TIME_NOW) != 0) {
         atomic_store(&_overrun, true);
         return;
@@ -117,7 +160,7 @@ static double hostSeconds(UInt64 hostTime) {
     atomic_store(&_lastBuffer, AudioGetCurrentHostTime());
     dispatch_async(_writer, ^{
         @autoreleasepool {
-            if (!atomic_load(&self->_writeFailed)) {
+            if (!self->_finished) {
                 [self write:copy hostTime:hostTime];
             }
             dispatch_semaphore_signal(self->_slots);
@@ -126,32 +169,46 @@ static double hostSeconds(UInt64 hostTime) {
 }
 
 - (void)write:(AVAudioPCMBuffer *)buffer hostTime:(UInt64)hostTime {
-    if (!_firstHostTime) _firstHostTime = hostTime;
-    AVAudioFramePosition expected = llround((hostSeconds(hostTime) - hostSeconds(_firstHostTime)) * _format.sampleRate);
-    AVAudioFramePosition gap = expected - _frames;
-    // Ignore small clock jitter and pad actual callback gaps on the shared host timeline.
-    if (gap > _format.sampleRate * 0.08) {
-        AVAudioFrameCount capacity = (AVAudioFrameCount)_format.sampleRate;
-        AVAudioPCMBuffer *silence = [[AVAudioPCMBuffer alloc] initWithPCMFormat:_format frameCapacity:capacity];
-        while (gap > 0) {
-            silence.frameLength = (AVAudioFrameCount)MIN(gap, capacity);
-            AudioBufferList *list = silence.mutableAudioBufferList;
-            for (UInt32 i = 0; i < list->mNumberBuffers; ++i) {
-                memset(list->mBuffers[i].mData, 0, list->mBuffers[i].mDataByteSize);
-            }
-            if (![_file writeFromBuffer:silence error:NULL]) {
-                atomic_store(&_writeFailed, true);
-                return;
-            }
-            _frames += silence.frameLength;
-            gap -= silence.frameLength;
-        }
+    double now = hostSeconds(AudioGetCurrentHostTime());
+    if (atomic_load(&_writeFailed) && now < _retryAfter) return;
+    double delta = _firstHostTime ? hostSeconds(hostTime) - hostSeconds(_firstHostTime) : 0;
+    double expected = delta * _format.sampleRate;
+    double gap = expected - _frames;
+    // Discontinuous clocks must never trigger an unbounded silence allocation or write loop.
+    if (_firstHostTime && (!isfinite(expected) || delta < 0 || gap > 60 * _format.sampleRate)) {
+        hostTime = _firstHostTime + AudioConvertNanosToHostTime((UInt64)(_frames / _format.sampleRate * 1e9));
+        gap = 0;
+        atomic_store(&_overrun, true);
     }
-    if (![_file writeFromBuffer:buffer error:NULL]) {
+    if (_frames >= _format.sampleRate * 30 || gap > 2 * _format.sampleRate) [self nextChunk];
+    NSError *error = nil;
+    if (!_file && ![self openFile:&error]) {
+        @synchronized (self) { _writeIssue = error.localizedDescription; }
         atomic_store(&_writeFailed, true);
+        _retryAfter = now + 1;
         return;
     }
-    _frames += buffer.frameLength;
+    if (!_firstHostTime) {
+        _firstHostTime = hostTime ?: AudioGetCurrentHostTime();
+        NSData *metadata = [NSJSONSerialization dataWithJSONObject:@{@"hostTime": @(_firstHostTime)} options:0 error:&error];
+        if (![metadata writeToURL:[_url URLByAppendingPathExtension:@"json"] options:NSDataWritingAtomic error:&error]) {
+            @synchronized (self) { _writeIssue = error.localizedDescription; }
+            atomic_store(&_writeFailed, true);
+            _retryAfter = now + 1;
+            [self nextChunk];
+            return;
+        }
+        gap = 0;
+    }
+    atomic_store(&_writeFailed, false);
+    if (gap > _format.sampleRate * 0.08 && gap <= _format.sampleRate * 2) {
+        AVAudioPCMBuffer *silence = [[AVAudioPCMBuffer alloc] initWithPCMFormat:_format frameCapacity:(AVAudioFrameCount)gap];
+        silence.frameLength = (AVAudioFrameCount)gap;
+        AudioBufferList *list = silence.mutableAudioBufferList;
+        for (UInt32 i = 0; i < list->mNumberBuffers; ++i) memset(list->mBuffers[i].mData, 0, list->mBuffers[i].mDataByteSize);
+        if (![self saveBuffer:silence]) return;
+    }
+    if (![self saveBuffer:buffer]) return;
 
     float peak = 0;
     const AudioBufferList *list = buffer.audioBufferList;
@@ -178,12 +235,18 @@ static double hostSeconds(UInt64 hostTime) {
     atomic_store(&_level, fmaxf(fminf(peak, 1), atomic_load(&_level) * 0.85f));
 }
 
-- (void)finish {
-    dispatch_sync(_writer, ^{ self->_file = nil; });
+- (BOOL)finish {
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(_writer, ^{ self->_finished = YES; [self closeChunk]; dispatch_semaphore_signal(done); });
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC))) {
+        @synchronized (self) { self->_writeIssue = @"磁盘写入超时，已完成的片段已保留，请稍后重试导出。"; }
+        return NO;
+    }
+    return YES;
 }
 
 - (NSString *)warning {
-    if (atomic_load(&_writeFailed)) return @"写入录音失败，请检查磁盘剩余空间。";
+    @synchronized (self) { if (_writeIssue) return [@"部分录音写入异常，已保留可用片段：" stringByAppendingString:_writeIssue]; }
     if (atomic_load(&_overrun)) return @"部分音频缓冲未能写入，录音可能有短暂缺口。";
     return nil;
 }
@@ -223,7 +286,10 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
                 loadError = error;
                 dispatch_semaphore_signal(ready);
             }];
-            dispatch_semaphore_wait(ready, DISPATCH_TIME_FOREVER);
+            if (dispatch_semaphore_wait(ready, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC))) {
+                [asset cancelLoading];
+                return @"读取片段超时，原始录音已保留，可重试导出。";
+            }
             if (!audio) return loadError.localizedDescription ?: @"无法读取录音片段。";
 
             CMTime start = CMTimeMakeWithSeconds(hostSeconds(segment.firstHostTime) - hostSeconds(origin), 1000000);
@@ -262,8 +328,39 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
     export.outputURL = destination;
     dispatch_semaphore_t finished = dispatch_semaphore_create(0);
     [export exportAsynchronouslyWithCompletionHandler:^{ dispatch_semaphore_signal(finished); }];
-    dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
+    if (dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC))) {
+        [export cancelExport];
+        return @"导出超时，原始录音已保留，可重试导出。";
+    }
     return export.status == AVAssetExportSessionStatusCompleted ? nil : (export.error.localizedDescription ?: @"M4A 导出失败。");
+}
+
+static NSString *exportDirectory(NSURL *directory, NSURL *destination, NSString **warning) {
+    NSString *savedWarning = [NSString stringWithContentsOfURL:[directory URLByAppendingPathComponent:@"capture-warning"] encoding:NSUTF8StringEncoding error:NULL];
+    if (savedWarning.length) *warning = savedWarning;
+    NSMutableArray *system = [NSMutableArray array], *mic = [NSMutableArray array];
+    NSArray *files = [NSFileManager.defaultManager contentsOfDirectoryAtURL:directory includingPropertiesForKeys:nil options:0 error:NULL];
+    for (NSURL *url in files) {
+        if (![url.pathExtension isEqual:@"caf"] ||
+            !([url.lastPathComponent hasPrefix:@"system-"] || [url.lastPathComponent hasPrefix:@"mic-"])) continue;
+        NSDictionary *metadata = [NSJSONSerialization JSONObjectWithData:
+            [NSData dataWithContentsOfURL:[url URLByAppendingPathExtension:@"json"]] ?: [NSData data] options:0 error:NULL];
+        NSNumber *hostTime = [metadata isKindOfClass:NSDictionary.class] ? metadata[@"hostTime"] : nil;
+        SYTrack *track = [hostTime isKindOfClass:NSNumber.class] ?
+            [[SYTrack alloc] initReading:url hostTime:hostTime.unsignedLongLongValue] : nil;
+        if (!track) { *warning = @"部分片段不可读，已保留原始录音供恢复。"; continue; }
+        if ([url.lastPathComponent hasPrefix:@"system-"]) [system addObject:track];
+        else if ([url.lastPathComponent hasPrefix:@"mic-"]) [mic addObject:track];
+    }
+    NSComparator order = ^NSComparisonResult(SYTrack *a, SYTrack *b) {
+        return a.firstHostTime < b.firstHostTime ? NSOrderedAscending : a.firstHostTime > b.firstHostTime ? NSOrderedDescending : NSOrderedSame;
+    };
+    [system sortUsingComparator:order]; [mic sortUsingComparator:order];
+    NSDictionary *session = [NSJSONSerialization JSONObjectWithData:
+        [NSData dataWithContentsOfURL:[directory URLByAppendingPathComponent:@"session.json"]] ?: NSData.data options:0 error:NULL];
+    BOOL withSystem = [session isKindOfClass:NSDictionary.class] && [session[@"system_audio"] isEqual:@YES];
+    BOOL withMic = [session isKindOfClass:NSDictionary.class] && [session[@"microphone"] isEqual:@YES];
+    return exportSegments(system, mic, withSystem, withMic, destination, warning);
 }
 
 @interface SYRecorder : NSObject {
@@ -274,6 +371,7 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
     BOOL _withMic;
     BOOL _systemRunning;
     BOOL _micTapInstalled;
+    BOOL _drainFailed;
     AudioObjectID _outputDevice;
     AudioObjectID _inputDevice;
     AudioObjectID _tap;
@@ -292,6 +390,7 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
 - (NSString *)start;
 - (NSDictionary *)snapshot;
 - (NSString *)stopAndExport:(NSURL *)destination warning:(NSString **)warning;
+- (NSString *)closeCapture;
 @end
 
 @implementation SYRecorder
@@ -416,7 +515,11 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
 
 - (void)finishTrack:(SYTrack *)track inSegments:(NSMutableArray<SYTrack *> *)segments {
     if (!track) return;
-    [track finish];
+    if (![track finish]) {
+        _drainFailed = YES;
+        [segments addObject:track];
+        return;
+    }
     if (track.frames || track.warning) {
         [segments addObject:track];
     } else {
@@ -476,7 +579,7 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
             [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(__unused BOOL granted) {
                 dispatch_semaphore_signal(decision);
             }];
-            dispatch_semaphore_wait(decision, DISPATCH_TIME_FOREVER);
+            dispatch_semaphore_wait(decision, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC));
             permission = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
         }
         if (permission != AVAuthorizationStatusAuthorized) {
@@ -485,7 +588,8 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
     }
 
     __block NSString *error = nil;
-    dispatch_sync(_control, ^{
+    dispatch_group_t starting = dispatch_group_create();
+    dispatch_group_async(starting, _control, ^{
         [self reconcileRoutes];
         error = self->_systemIssue ?: self->_micIssue;
         if (error) {
@@ -500,12 +604,16 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
         dispatch_source_set_event_handler(self->_routeTimer, ^{ [weakSelf reconcileRoutes]; });
         dispatch_resume(self->_routeTimer);
     });
+    if (dispatch_group_wait(starting, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC))) {
+        return @"连接音频设备超时，请重试。已有片段会保留在本机。";
+    }
     return error;
 }
 
 - (NSDictionary *)snapshot {
     __block NSDictionary *result;
-    dispatch_sync(_control, ^{
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(_control, ^{
         result = @{
             @"systemLevel": @([self->_system level]),
             @"micLevel": @([self->_mic level]),
@@ -513,23 +621,43 @@ static NSString *exportSegments(NSArray<SYTrack *> *system, NSArray<SYTrack *> *
             @"inputName": deviceName(self->_inputDevice ?: defaultDevice(kAudioHardwarePropertyDefaultInputDevice)),
             @"warning": self->_systemIssue ?: self->_micIssue ?: [self->_system warning] ?: [self->_mic warning] ?: NSNull.null
         };
+        dispatch_semaphore_signal(done);
     });
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 5))) {
+        return @{@"systemLevel": @0, @"micLevel": @0, @"outputName": @"正在连接…", @"inputName": @"正在连接…",
+                 @"warning": @"音频设备响应缓慢，可停止录音并保存已有片段。"};
+    }
     return result;
 }
 
-- (NSString *)stopAndExport:(NSURL *)destination warning:(NSString **)warning {
-    __block NSString *routeIssue;
-    dispatch_sync(_control, ^{
-        routeIssue = self->_systemIssue ?: self->_micIssue;
+- (NSString *)closeCapture {
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(_control, ^{
         if (self->_routeTimer) {
             dispatch_source_cancel(self->_routeTimer);
             self->_routeTimer = nil;
         }
         [self closeSystem];
         [self closeMic];
+        NSString *warning = self->_systemIssue ?: self->_micIssue;
+        for (SYTrack *track in [self->_systemSegments arrayByAddingObjectsFromArray:self->_micSegments]) {
+            warning = warning ?: track.warning;
+        }
+        if (warning) [warning writeToURL:[self->_directory URLByAppendingPathComponent:@"capture-warning"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        if (!self->_drainFailed) [NSData.data writeToURL:[self->_directory URLByAppendingPathComponent:@"capture.closed"] atomically:YES];
+        dispatch_semaphore_signal(done);
     });
-    *warning = routeIssue;
-    return exportSegments(_systemSegments, _micSegments, _withSystem, _withMic, destination, warning);
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC))) {
+        return @"停止音频设备超时，原始片段已保留。可退出并重新打开 Bicord 后重试导出。";
+    }
+    return _drainFailed ? @"磁盘写入超时，片段已保留，请退出并重新打开后重试导出。" : nil;
+}
+
+- (NSString *)stopAndExport:(NSURL *)destination warning:(NSString **)warning {
+    NSString *issue = [self closeCapture];
+    if (issue) return issue;
+    *warning = _systemIssue ?: _micIssue ?: [_systemSegments.lastObject warning] ?: [_micSegments.lastObject warning];
+    return exportDirectory(_directory, destination, warning);
 }
 @end
 
@@ -539,6 +667,7 @@ void *sy_start(const char *directory, bool system, bool microphone, char **error
             [NSURL fileURLWithPath:[NSString stringWithUTF8String:directory] isDirectory:YES] withSystem:system withMic:microphone];
         NSString *issue = [recorder start];
         if (issue) {
+            [recorder closeCapture];
             *error = strdup(issue.UTF8String);
             return NULL;
         }
@@ -566,6 +695,19 @@ void sy_stop(void *handle, const char *destination, char **error, char **warning
         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:destination]];
         NSString *notice = nil;
         NSString *issue = [recorder stopAndExport:url warning:&notice];
+        if (issue) *error = strdup(issue.UTF8String);
+        if (notice) *warning = strdup(notice.UTF8String);
+    }
+}
+
+void sy_close(void *handle) {
+    @autoreleasepool { SYRecorder *recorder = (__bridge_transfer SYRecorder *)handle; [recorder closeCapture]; }
+}
+
+void sy_export(const char *directory, const char *destination, char **error, char **warning) {
+    @autoreleasepool {
+        NSString *notice = nil;
+        NSString *issue = exportDirectory([NSURL fileURLWithPath:@(directory)], [NSURL fileURLWithPath:@(destination)], &notice);
         if (issue) *error = strdup(issue.UTF8String);
         if (notice) *warning = strdup(notice.UTF8String);
     }

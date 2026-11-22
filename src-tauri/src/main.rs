@@ -13,7 +13,7 @@ use std::{
     },
     time::Instant,
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 extern "C" {
     fn sy_start(
@@ -29,6 +29,13 @@ extern "C" {
         error: *mut *mut c_char,
         warning: *mut *mut c_char,
     );
+    fn sy_close(handle: *mut c_void);
+    fn sy_export(
+        directory: *const c_char,
+        destination: *const c_char,
+        error: *mut *mut c_char,
+        warning: *mut *mut c_char,
+    );
     fn sy_publish(source: *const c_char, destination: *const c_char) -> *mut c_char;
     fn sy_choose_directory(path: *const c_char) -> *mut c_char;
     fn sy_duration(path: *const c_char) -> f64;
@@ -39,6 +46,14 @@ struct NativeRecorder(NonNull<c_void>);
 
 // Commands serialize ownership through the session mutex. The native recorder serializes route changes.
 unsafe impl Send for NativeRecorder {}
+
+impl NativeRecorder {
+    fn close(self) {
+        unsafe {
+            sy_close(self.0.as_ptr());
+        }
+    }
+}
 
 struct Session {
     native: NativeRecorder,
@@ -52,6 +67,7 @@ struct Session {
 #[derive(Default)]
 struct Recorder {
     busy: AtomicBool,
+    quitting: AtomicBool,
     session: Mutex<Option<Session>>,
 }
 
@@ -83,10 +99,20 @@ struct Recording {
     bytes: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct Recovery {
+    id: String,
+    name: String,
+    pid: u32,
+    system_audio: bool,
+    microphone: bool,
+}
+
 #[derive(Serialize)]
 struct Library {
     directory: String,
     recordings: Vec<Recording>,
+    pending: Vec<Recovery>,
 }
 
 fn c_path(path: &Path) -> Result<CString, String> {
@@ -185,10 +211,14 @@ fn start(app: &AppHandle, system_audio: bool, microphone: bool) -> Result<Status
     }
     let state = app.state::<Recorder>();
     let mut session = state.session.lock().map_err(|error| error.to_string())?;
-    if session.is_some() {
+    if session.is_some()
+        || state
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
         return Err("已有一场录音正在进行。".into());
     }
-    state.busy.store(true, Ordering::Release);
 
     let result = (|| {
         let now = Local::now();
@@ -199,10 +229,26 @@ fn start(app: &AppHandle, system_audio: bool, microphone: bool) -> Result<Status
             .mode(0o700)
             .create(&directory)
             .map_err(|error| format!("无法创建临时录音目录。{error}"))?;
+        let recovery = Recovery {
+            id: directory
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            name: name.clone(),
+            pid: std::process::id(),
+            system_audio,
+            microphone,
+        };
+        fs::write(
+            directory.join("session.json"),
+            serde_json::to_vec(&recovery).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
         let mut error = null_mut();
         let handle = unsafe { sy_start(path.as_ptr(), system_audio, microphone, &mut error) };
         let Some(handle) = NonNull::new(handle) else {
-            let _ = fs::remove_dir_all(&directory);
+            // Preserve any audio captured before initialization failed.
             return Err(take_string(error).unwrap_or_else(|| "无法开始录音。".into()));
         };
         *session = Some(Session {
@@ -233,12 +279,48 @@ fn snapshot(session: Option<&Session>) -> Result<Status, String> {
     })
 }
 
+fn publish_session(
+    directory: &Path,
+    name: &str,
+    pending: &Path,
+    notice: Option<String>,
+) -> Result<Option<String>, String> {
+    if recording_timestamp(name).is_none() {
+        return Err("录音名称无效。".into());
+    }
+    let source = c_path(pending)?;
+    let destination = c_path(&directory.with_file_name(name))?;
+    if let Some(error) = take_string(unsafe { sy_publish(source.as_ptr(), destination.as_ptr()) }) {
+        return Err(format!("无法保存 M4A。{error}"));
+    }
+    if notice.is_none() {
+        let _ = fs::remove_dir_all(directory);
+    } else {
+        // Keep source audio when an incomplete export was reported.
+        let _ = fs::write(directory.join("published"), name);
+    }
+    Ok(notice.map(|warning| {
+        format!(
+            "{warning}\n可用音频已导出，原始片段保留于：{}",
+            directory.display()
+        )
+    }))
+}
+
+fn export_path(directory: &Path) -> PathBuf {
+    directory.join(format!("export-{}.m4a", Local::now().format("%s%.9f")))
+}
+
 fn stop(app: &AppHandle) -> Result<Option<String>, String> {
     let state = app.state::<Recorder>();
-    let mut guard = state.session.lock().map_err(|error| error.to_string())?;
-    let session = guard.take().ok_or("当前没有进行中的录音。")?;
+    let session = state
+        .session
+        .lock()
+        .map_err(|error| error.to_string())?
+        .take()
+        .ok_or("当前没有进行中的录音。")?;
     let result = (|| {
-        let pending = session.directory.join("导出.m4a");
+        let pending = export_path(&session.directory);
         let path = c_path(&pending)?;
         let mut error = null_mut();
         let mut warning = null_mut();
@@ -252,19 +334,81 @@ fn stop(app: &AppHandle) -> Result<Option<String>, String> {
         };
         let notice = take_string(warning);
         if let Some(error) = take_string(error) {
+            let _ = fs::remove_file(&pending);
             return Err(error);
         }
-
-        let destination = c_path(&session.directory.with_file_name(&session.name))?;
-        if let Some(error) = take_string(unsafe { sy_publish(path.as_ptr(), destination.as_ptr()) })
-        {
-            return Err(format!("无法保存 M4A。{error}"));
-        }
-        let _ = fs::remove_dir_all(&session.directory);
-        Ok(notice)
+        publish_session(&session.directory, &session.name, &pending, notice)
     })();
     state.busy.store(false, Ordering::Release);
-    result.map_err(|error| format!("{error}\n原始片段目录：{}", session.directory.display()))
+    result.map_err(|error| {
+        format!(
+            "{error}\n原始片段已保留，可重试导出：{}",
+            session.directory.display()
+        )
+    })
+}
+
+fn read_recovery(directory: &Path) -> Option<Recovery> {
+    if !fs::symlink_metadata(directory).ok()?.is_dir() || directory.join("published").exists() {
+        return None;
+    }
+    let recovery: Recovery =
+        serde_json::from_slice(&fs::read(directory.join("session.json")).ok()?).ok()?;
+    if !fs::read_dir(directory)
+        .ok()?
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(".caf.json"))
+    {
+        return None;
+    }
+    if directory.file_name()?.to_str()? != recovery.id
+        || recording_timestamp(&recovery.name).is_none()
+    {
+        return None;
+    }
+    Some(recovery)
+}
+
+fn retry(app: &AppHandle, id: &str) -> Result<Option<String>, String> {
+    if !id.starts_with(".bicord-recording-")
+        || Path::new(id).file_name().and_then(|name| name.to_str()) != Some(id)
+    {
+        return Err("录音标识无效。".into());
+    }
+    let state = app.state::<Recorder>();
+    if state
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("请等待当前录音或导出完成。".into());
+    }
+    let result = (|| {
+        let directory = library(app)?.join(id);
+        let recovery = read_recovery(&directory).ok_or("找不到待恢复录音。")?;
+        if recovery.pid == std::process::id() && !directory.join("capture.closed").exists() {
+            return Err("音频设备仍在停止，请稍后重试，或退出并重新打开 Bicord。".into());
+        }
+        let pending = export_path(&directory);
+        let mut error = null_mut();
+        let mut warning = null_mut();
+        unsafe {
+            sy_export(
+                c_path(&directory)?.as_ptr(),
+                c_path(&pending)?.as_ptr(),
+                &mut error,
+                &mut warning,
+            );
+        }
+        let notice = take_string(warning);
+        if let Some(error) = take_string(error) {
+            let _ = fs::remove_file(&pending);
+            return Err(format!("{error} 原始片段仍保留。"));
+        }
+        publish_session(&directory, &recovery.name, &pending, notice)
+    })();
+    state.busy.store(false, Ordering::Release);
+    result
 }
 
 fn recording_timestamp(name: &str) -> Option<&str> {
@@ -279,9 +423,24 @@ fn recording_timestamp(name: &str) -> Option<&str> {
 fn list(app: &AppHandle) -> Result<Library, String> {
     let path = library(app)?;
     let mut recordings = Vec::new();
+    let mut pending = Vec::new();
+    let state = app.state::<Recorder>();
+    let active_directory = state
+        .session
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        .map(|session| session.directory.clone());
     for entry in fs::read_dir(&path).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(".bicord-recording-")
+            && active_directory.as_ref() != Some(&entry.path())
+        {
+            if let Some(recovery) = read_recovery(&entry.path()) {
+                pending.push(recovery);
+            }
+        }
         if recording_timestamp(&name).is_none()
             || !entry.file_type().is_ok_and(|kind| kind.is_file())
         {
@@ -309,6 +468,7 @@ fn list(app: &AppHandle) -> Result<Library, String> {
     Ok(Library {
         directory: directory.display().to_string(),
         recordings,
+        pending,
     })
 }
 
@@ -342,6 +502,11 @@ async fn recording_status(app: AppHandle) -> Result<Status, String> {
 #[tauri::command]
 async fn recording_stop(app: AppHandle) -> Result<Option<String>, String> {
     background(move || stop(&app)).await
+}
+
+#[tauri::command]
+async fn recording_retry(app: AppHandle, id: String) -> Result<Option<String>, String> {
+    background(move || retry(&app, &id)).await
 }
 
 #[tauri::command]
@@ -382,11 +547,24 @@ async fn recording_open(app: AppHandle, name: Option<String>, reveal: bool) -> R
 }
 
 fn can_exit(app: &AppHandle) -> bool {
-    if app.state::<Recorder>().busy.load(Ordering::Acquire) {
-        let _ = app.emit("recording-close-blocked", ());
-        return false;
+    let state = app.state::<Recorder>();
+    if state.quitting.load(Ordering::Acquire) {
+        return true;
     }
-    true
+    let Ok(mut guard) = state.session.try_lock() else {
+        return true;
+    };
+    let Some(session) = guard.take() else {
+        return true;
+    };
+    state.quitting.store(true, Ordering::Release);
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Closing capture seals the chunks; next launch offers export without delaying quit for encoding.
+        session.native.close();
+        app.exit(0);
+    });
+    false
 }
 
 fn main() {
@@ -396,6 +574,7 @@ fn main() {
             recording_start,
             recording_status,
             recording_stop,
+            recording_retry,
             recording_list,
             recording_choose_directory,
             recording_open
@@ -416,4 +595,54 @@ fn main() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_and_publish_preserve_sources_on_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "bicord-rust-test-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let directory = root.join(".bicord-recording-test");
+        fs::create_dir(&directory).unwrap();
+        let name = "录音 2026-11-23 12.00.00.000.m4a";
+        let recovery = Recovery {
+            id: ".bicord-recording-test".into(),
+            name: name.into(),
+            pid: 0,
+            system_audio: true,
+            microphone: true,
+        };
+        fs::write(
+            directory.join("session.json"),
+            serde_json::to_vec(&recovery).unwrap(),
+        )
+        .unwrap();
+        fs::write(directory.join("system-a.caf"), b"source").unwrap();
+        fs::write(directory.join("system-a.caf.json"), b"{}").unwrap();
+        assert_eq!(read_recovery(&directory).unwrap().name, name);
+        let pending = directory.join("export.m4a");
+        fs::write(&pending, b"encoded").unwrap();
+        fs::write(root.join(name), b"existing").unwrap();
+        assert!(publish_session(&directory, name, &pending, None).is_err());
+        assert_eq!(fs::read(root.join(name)).unwrap(), b"existing");
+        assert!(pending.exists() && directory.join("system-a.caf").exists());
+        fs::remove_file(root.join(name)).unwrap();
+        assert!(
+            publish_session(&directory, name, &pending, Some("partial".into()))
+                .unwrap()
+                .is_some()
+        );
+        assert!(directory.join("system-a.caf").exists());
+        assert!(read_recovery(&directory).is_none());
+        assert!(recording_timestamp("../录音 bad.m4a").is_none());
+        assert!(recording_timestamp("会议录音 old.m4a").is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
