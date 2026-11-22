@@ -180,6 +180,18 @@ int main(int argc, const char *argv[]) {
         dispatch_semaphore_signal(unblock);
         dispatch_sync(control, ^{});
         puts("An unresponsive audio device did not block status or stop indefinitely.");
+        SYRecorder *nativeQuit = [[SYRecorder alloc] initWithDirectory:directory withSystem:NO withMic:NO];
+        SYTrack *lastChunk = [[SYTrack alloc] initWithURL:[directory URLByAppendingPathComponent:@"mic-quit.caf"] format:format error:NULL];
+        AVAudioPCMBuffer *lastBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:format frameCapacity:8000];
+        lastBuffer.frameLength = 8000;
+        memset(lastBuffer.floatChannelData[0], 0, 8000 * sizeof(float));
+        [lastChunk enqueue:lastBuffer.audioBufferList frames:8000 hostTime:AudioGetCurrentHostTime()];
+        [nativeQuit setValue:lastChunk forKey:@"mic"];
+        [NSNotificationCenter.defaultCenter postNotificationName:NSApplicationWillTerminateNotification object:nil];
+        assert(lastChunk.frames == 8000);
+        assert([NSFileManager.defaultManager fileExistsAtPath:[[directory URLByAppendingPathComponent:@"capture.closed"] path]]);
+        assert(fabs(sy_duration(lastChunk.url.path.UTF8String) - 1) < 0.001);
+        puts("Native macOS termination drained and sealed the current chunk.");
         assert([NSFileManager.defaultManager removeItemAtURL:directory error:NULL]);
         puts("M4A mix preserved both sources before and after a device format change.");
     }

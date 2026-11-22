@@ -367,6 +367,7 @@ static NSString *exportDirectory(NSURL *directory, NSURL *destination, NSString 
     NSURL *_directory;
     dispatch_queue_t _control;
     dispatch_source_t _routeTimer;
+    id _terminationObserver;
     BOOL _withSystem;
     BOOL _withMic;
     BOOL _systemRunning;
@@ -402,7 +403,15 @@ static NSString *exportDirectory(NSURL *directory, NSURL *destination, NSString 
     _control = dispatch_queue_create("local.bicord.routes", DISPATCH_QUEUE_SERIAL);
     _systemSegments = [NSMutableArray array];
     _micSegments = [NSMutableArray array];
+    // Native macOS Quit can bypass the Tauri exit request callback.
+    __weak SYRecorder *weakSelf = self;
+    _terminationObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationWillTerminateNotification
+        object:nil queue:nil usingBlock:^(__unused NSNotification *notification) { [weakSelf closeCapture]; }];
     return self;
+}
+
+- (void)dealloc {
+    if (_terminationObserver) [NSNotificationCenter.defaultCenter removeObserver:_terminationObserver];
 }
 
 - (SYTrack *)trackFor:(NSString *)source format:(AVAudioFormat *)format error:(NSError **)error {

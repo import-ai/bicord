@@ -68,6 +68,7 @@ struct Session {
 struct Recorder {
     busy: AtomicBool,
     quitting: AtomicBool,
+    exit_ready: AtomicBool,
     session: Mutex<Option<Session>>,
 }
 
@@ -548,20 +549,29 @@ async fn recording_open(app: AppHandle, name: Option<String>, reveal: bool) -> R
 
 fn can_exit(app: &AppHandle) -> bool {
     let state = app.state::<Recorder>();
-    if state.quitting.load(Ordering::Acquire) {
+    if state.exit_ready.load(Ordering::Acquire) {
         return true;
     }
-    let Ok(mut guard) = state.session.try_lock() else {
-        return true;
-    };
-    let Some(session) = guard.take() else {
-        return true;
-    };
-    state.quitting.store(true, Ordering::Release);
+    if state.quitting.swap(true, Ordering::AcqRel) {
+        return false;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // Closing capture seals the chunks; next launch offers export without delaying quit for encoding.
-        session.native.close();
+        let state = app.state::<Recorder>();
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let session = loop {
+            match state.session.try_lock() {
+                Ok(mut guard) => break guard.take(),
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                _ => break None,
+            }
+        };
+        if let Some(session) = session {
+            session.native.close();
+        }
+        state.exit_ready.store(true, Ordering::Release);
         app.exit(0);
     });
     false
